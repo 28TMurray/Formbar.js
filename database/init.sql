@@ -117,15 +117,33 @@ CREATE TABLE IF NOT EXISTS "temp_user_creation_data"
     "secret" TEXT UNIQUE
 );
 
+-- CREATE TABLE IF NOT EXISTS "transactions"
+-- (
+--     "from"     INTEGER NOT NULL,
+--     "to"       INTEGER NOT NULL,
+--     "digipogs" INTEGER NOT NULL,
+--     "app"      TEXT    NOT NULL DEFAULT 'None',
+--     "reason"   TEXT    NOT NULL DEFAULT 'None',
+--     "date"     TEXT    NOT NULL
+-- );
+
 CREATE TABLE IF NOT EXISTS "transactions"
-(
-    "from"     INTEGER NOT NULL,
-    "to"       INTEGER NOT NULL,
-    "digipogs" INTEGER NOT NULL,
-    "app"      TEXT    NOT NULL DEFAULT 'None',
-    "reason"   TEXT    NOT NULL DEFAULT 'None',
-    "date"     TEXT    NOT NULL
-);
+( 
+    "id"            INTEGER NOT NULL UNIQUE,
+    "from_owner_id" INTEGER NOT NULL,
+    "from_type"     TEXT,
+    "from_pool_id"  INTEGER,
+    "from_payload"  TEXT,
+    "to_owner_id"   INTEGER NOT NULL,
+    "to_type"       TEXT,
+    "to_pool_id"    INTEGER,
+    "to_payload"    TEXT,
+    "reason"        TEXT,
+    "status"        TEXT,
+    "failure_reason"    TEXT,
+    "created_at"    TEXT, -- iso-8601
+    "updated_at"    TEXT, -- iso-8601
+)
 
 CREATE TABLE IF NOT EXISTS "users"
 (
