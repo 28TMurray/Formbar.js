@@ -1,6 +1,6 @@
 const { dbGet, dbGetAll, dbRun } = require("@modules/database");
 const { buildPagination } = require("@modules/pagination");
-const { creditDigipogTransferRecipient, isPoolOwnedByUser } = require("@services/digipog-service");
+const { creditDigipogTransferRecipient, isPoolFoundedByUser } = require("@services/digipog-service");
 const { addItemToInventory } = require("@services/inventory-service");
 const { createNotification } = require("@services/notification-service");
 const NotFoundError = require("@errors/not-found-error");
@@ -161,7 +161,7 @@ async function validateSide(side, userId, label) {
             throw new ValidationError(`The ${label} pool was not found.`, { reason: "pool_not_found" });
         }
 
-        const isOwner = await isPoolOwnedByUser(poolId, userId);
+        const isOwner = await isPoolFoundedByUser(poolId, userId);
         if (!isOwner) {
             throw new ValidationError(`The ${label} pool must be owned by the ${label === "offered" ? "requester" : "recipient"}.`, {
                 reason: "pool_not_owned",
@@ -435,7 +435,7 @@ async function acceptTrade(tradeId, userId) {
                 }
             }
         } else {
-            const stillOwner = await isPoolOwnedByUser(trade.from_pool_id, fromUserId);
+            const stillOwner = await isPoolFoundedByUser(trade.from_pool_id, fromUserId);
             if (!stillOwner) {
                 return await failTrade("Requester no longer owns the source pool.");
             }
@@ -454,7 +454,7 @@ async function acceptTrade(tradeId, userId) {
                 }
             }
         } else {
-            const stillOwner = await isPoolOwnedByUser(trade.to_pool_id, toUserId);
+            const stillOwner = await isPoolFoundedByUser(trade.to_pool_id, toUserId);
             if (!stillOwner) {
                 return await failTrade("Recipient no longer owns the source pool.");
             }
