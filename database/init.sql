@@ -130,11 +130,11 @@ CREATE TABLE IF NOT EXISTS "temp_user_creation_data"
 CREATE TABLE IF NOT EXISTS "transactions"
 ( 
     "id"            INTEGER NOT NULL UNIQUE,
-    "from_owner_id" INTEGER NOT NULL,
+    "from_user_id"  INTEGER NOT NULL,
     "from_type"     TEXT,
     "from_pool_id"  INTEGER,
     "from_payload"  TEXT,
-    "to_owner_id"   INTEGER NOT NULL,
+    "to_user_id"    INTEGER NOT NULL,
     "to_type"       TEXT,
     "to_pool_id"    INTEGER,
     "to_payload"    TEXT,
@@ -143,7 +143,8 @@ CREATE TABLE IF NOT EXISTS "transactions"
     "failure_reason"    TEXT,
     "created_at"    TEXT, -- iso-8601
     "updated_at"    TEXT, -- iso-8601
-)
+    PRIMARY KEY ("id" AUTOINCREMENT)
+);
 
 CREATE TABLE IF NOT EXISTS "users"
 (

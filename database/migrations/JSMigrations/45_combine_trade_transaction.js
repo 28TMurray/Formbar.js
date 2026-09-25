@@ -2,8 +2,6 @@ const { dbGet, dbGetAll, dbRun } = require("@modules/database");
 
 module.exports = {
     async run(database) {
-        // 
-
         // Assumed that transactions was already combined if trades doesn't exist
         const tradesTable = await dbGet("SELECT name FROM sqlite_master WHERE type='table' AND name='trades'");
         if (!tradesTable) return;
