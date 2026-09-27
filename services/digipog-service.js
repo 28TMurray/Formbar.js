@@ -293,10 +293,10 @@ function poolTopHolderCheck(req) {
  * Add a user to a pool.
  * @param {number} poolId - poolId.
  * @param {number} userId - userId.
- * @param {boolean} founderFlag - ownerFlag.
+ * @param {boolean} founderFlag - founderFlag.
  * @returns {Promise<void>}
  */
-async function addUserToPool(poolId, userId, ownerFlag = 0) {
+async function addUserToPool(poolId, userId, founderFlag = 0) {
     return dbRun("INSERT OR REPLACE INTO digipog_pool_users (pool_id, user_id, owner) VALUES (?, ?, ?)", [poolId, userId, founderFlag ? 1 : 0]);
 }
 
