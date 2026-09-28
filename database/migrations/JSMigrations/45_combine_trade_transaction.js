@@ -3,7 +3,7 @@ const { dbGet, dbGetAll, dbRun } = require("@modules/database");
 module.exports = {
     async run(database) {
         // Doesn't run if exchanges already exists
-        const exchangeTable = await dbGet('SELECT name FROM sqlite_master WHERE name = \'exchanges\' and type = \'table\'');
+        const exchangeTable = await dbGet("SELECT name FROM sqlite_master WHERE name = 'exchanges' and type = 'table'");
         if (exchangeTable?.name) return;
 
         const transactionRows = await dbGetAll("SELECT * FROM transactions");
@@ -23,11 +23,11 @@ module.exports = {
             
             return {
                 fromUserId: fromFounderId ?? transaction.from_id,
-                fromPoolId: transaction.from_type === "pool" ? transaction.from_id : null,
+                fromId: transaction.from_type === "pool" ? transaction.from_id : null,
                 fromType: transaction.from_type,
                 offer: {0: transaction.amount},
                 toUserId: toFounderId ?? transaction.to_id,
-                toPoolId: transaction.to_type === "pool" ? transaction.to_id : null,
+                toId: transaction.to_type === "pool" ? transaction.to_id : null,
                 toType: transaction.to_type,
                 request: {},
                 reason: transaction.reason,
@@ -76,12 +76,12 @@ module.exports = {
             
             return {
                 fromUserId: trade.from_user,
-                fromPoolId: trade.from_pool_id,
-                fromType: trade.from_source_type === 'inventory' ? 'user' : trade.from_source_type,
+                fromId: trade.from_pool_id,
+                fromType: trade.from_source_type === "inventory" ? "user" : trade.from_source_type,
                 offer: offer,
                 toUserId: trade.to_user,
-                toPoolId: trade.to_pool_id,
-                toType: trade.to_source_type === 'inventory' ? 'user' : trade.to_source_type,
+                toId: trade.to_pool_id,
+                toType: trade.to_source_type === "inventory" ? "user" : trade.to_source_type,
                 request: request,
                 reason: "Trade",
                 status: trade.status,
@@ -99,11 +99,11 @@ module.exports = {
                ( 
                    "id"            INTEGER NOT NULL UNIQUE,
                    "from_user_id"  INTEGER,
-                   "from_pool_id"  INTEGER,
+                   "from_id"  INTEGER,
                    "from_type"     TEXT,
                    "offer"  TEXT,
                    "to_user_id"    INTEGER,
-                   "to_pool_id"    INTEGER,
+                   "to_id"    INTEGER,
                    "to_type"       TEXT,
                    "request"    TEXT,
                    "reason"        TEXT,
@@ -116,14 +116,14 @@ module.exports = {
              );
 
         for (const exchange of combinedExchanges) {
-            await dbRun('INSERT INTO exchanges (from_user_id, from_pool_id, from_type, offer, to_user_id, to_pool_id, to_type, request, reason, status, failure_reason, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            await dbRun("INSERT INTO exchanges (from_user_id, from_id, from_type, offer, to_user_id, to_id, to_type, request, reason, status, failure_reason, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                   [
                       exchange.fromUserId,
-                      exchange.fromPoolId,
+                      exchange.fromId,
                       exchange.fromType,
                       JSON.stringify(exchange.offer),
                       exchange.toUserId,
-                      exchange.toPoolId,
+                      exchange.toId,
                       exchange.toType,
                       JSON.stringify(exchange.request),
                       exchange.reason,

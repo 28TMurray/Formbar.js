@@ -131,11 +131,11 @@ CREATE TABLE IF NOT EXISTS "exchanges"
 ( 
     "id"            INTEGER NOT NULL UNIQUE,
     "from_user_id"  INTEGER,
-    "from_pool_id"  INTEGER,
+    "from_id"       INTEGER,
     "from_type"     TEXT,
     "offer"         TEXT,
     "to_user_id"    INTEGER,
-    "to_pool_id"    INTEGER,
+    "to_id"         INTEGER,
     "to_type"       TEXT,
     "request"       TEXT,
     "reason"        TEXT,

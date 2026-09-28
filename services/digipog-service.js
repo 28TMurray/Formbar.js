@@ -275,18 +275,11 @@ async function isPoolUserTopHolder(poolId, userId) {
     const maxQuantity = shareholders[0].quantity;
     
     for (const shareholder of shareholder) {
-        if (shareholder.quantity < maxQuantity) return false;
+        if (shareholder.quantity < maxQuantity) break;
         if (shareholder.user_id === userId) return true;
     }
-}
 
-/**
- * Middleware-compatible top shareholder check
- * @param {Object} req - Express request object
- * @returns {Promise<boolean>} Whether the requesting user is the top shareholder of the pool
- */
-function poolTopHolderCheck(req) {
-    return isPoolUserTopHolder(Number(req.params.id), req.user.id);
+    return false;
 }
 
 /**
@@ -413,8 +406,8 @@ async function payoutPool({ actingUserId, poolId, amount, payoutType }) {
         return { success: false, message: "Invalid pool ID." };
     }
 
-    const isOwner = await isPoolFoundedByUser(poolId, actingUserId);
-    if (!isOwner) {
+    const isFounder = await isPoolFoundedByUser(poolId, actingUserId);
+    if (!isFounder) {
         return { success: false, message: "You do not own this pool." };
     }
 
@@ -451,13 +444,17 @@ async function payoutPool({ actingUserId, poolId, amount, payoutType }) {
             if (!userShare) continue;
 
 			await dbRun("UPDATE users SET digipogs = digipogs + ? WHERE id = ?", [userPayout, shareholder.user_id])
-			await dbRun("INSERT INTO transactions (from_id, to_id, from_type, to_type, amount, reason, date) VALUES (?, ?, ?, ?, ?, ?, ?)", [
+			await dbRun("INSERT INTO exchanges (from_user_id, from_pool_id, from_type, offer, to_user_id, to_type, request, reason, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [
+                actingUserId,
                 pool.id,
-                shareholder.user_id,
                 "pool",
+                JSON.stringify({0: amount}),
+                shareholder.user_id,
                 "user",
-                userPayout,
-                "Pool Payout",
+                JSON.stringify({}),
+                "Pool payout",
+                "completed",
+                Date.now(),
                 Date.now(),
             ]);
         }
@@ -495,16 +492,21 @@ async function getUserTransactions(userId) {
  * @returns {Promise<Object[]>}
  */
 async function getUserTransactionsPaginated(userId, limit = 25, offset = 0) {
-    let whereQuery = "WHERE (from_id = ? AND from_type = 'user') OR (to_id = ? AND to_type = 'user')";
+    let whereQuery = "WHERE request = '{}' AND ((from_user_id = ? AND from_type = 'user') OR (to_user_id = ? AND to_type = 'user'))";
     const params = [userId, userId];
 
-    const totalRow = await dbGet(`SELECT COUNT(*) AS count FROM transactions ${whereQuery}`, params);
-    const transactions = await dbGetAll(`SELECT * FROM transactions ${whereQuery} ORDER BY date DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
+    const totalRow = await dbGet(`SELECT COUNT(*) AS count FROM exchanges ${whereQuery}`, params);
+    let transactions = await dbGetAll(`SELECT from_user_id, to_user_id, from_id, to_id, from_type, to_type, offer, reason, created_at FROM exchanges ${whereQuery} ORDER BY created_at DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
+    // Filter only for transactions.
+    transactions = transactions.filter((transaction) => {
+        const keys = Object.keys(JSON.parse(transaction.offer));
+        return keys.length === 1 && keys.includes("0");
+    });
     const enrichedTransactions = await enrichTransactions(transactions);
 
     return {
         transactions: enrichedTransactions,
-        total: totalRow ? totalRow.count : 0,
+        total: enrichedTransactions.length,
     };
 }
 
@@ -523,9 +525,9 @@ async function enrichTransactions(transactions) {
     const classIds = new Set();
 
     for (const transaction of transactions) {
-        if (transaction.from_id != null) {
+        if (transaction.from_user_id != null) {
             if (transaction.from_type === "user" || transaction.from_type === "award") {
-                userIds.add(transaction.from_id);
+                userIds.add(transaction.from_user_id);
             } else if (transaction.from_type === "pool") {
                 poolIds.add(transaction.from_id);
             } else if (transaction.from_type === "class") {
@@ -533,9 +535,9 @@ async function enrichTransactions(transactions) {
             }
         }
 
-        if (transaction.to_id != null) {
+        if (transaction.to_user_id != null) {
             if (transaction.to_type === "user" || transaction.to_type === "award") {
-                userIds.add(transaction.to_id);
+                userIds.add(transaction.to_user_id);
             } else if (transaction.to_type === "pool") {
                 poolIds.add(transaction.to_id);
             } else if (transaction.to_type === "class") {
@@ -551,11 +553,11 @@ async function enrichTransactions(transactions) {
     ]);
 
     return transactions.map((transaction) => ({
-        amount: transaction.amount,
+        amount: JSON.parse(transaction.offer)[0],
         reason: transaction.reason,
         date: transaction.date,
-        from: buildTransactionParty(transaction.from_id, transaction.from_type, users, pools, classes),
-        to: buildTransactionParty(transaction.to_id, transaction.to_type, users, pools, classes),
+        from: buildTransactionParty(transaction.from_user_id, transaction.from_id, transaction.from_type, users, pools, classes),
+        to: buildTransactionParty(transaction.from_user_id, transaction.to_id, transaction.to_type, users, pools, classes),
     }));
 }
 
@@ -631,18 +633,21 @@ async function fetchClassesByIds(classIds) {
  * @param {Object} classes - classes.
  * @returns {Object|null}
  */
-function buildTransactionParty(id, type, users, pools, classes) {
+function buildTransactionParty(userId, typedId, type, users, pools, classes) {
     const normalizedType = type || "unknown";
     let username = null;
-
+    let id = null;
+    
     if (normalizedType === "user" || normalizedType === "award") {
-        username = users.get(id)?.username || "Unknown User";
+        username = users.get(userId)?.username || "Unknown User";
+        id = userId;
     } else if (normalizedType === "pool") {
-        username = pools.get(id)?.username || "Unknown Pool";
+        username = pools.get(typedId)?.username || "Unknown Pool";
+        id = typedId;
     } else if (normalizedType === "class") {
-        username = classes.get(id)?.username || "Unknown Class";
+        username = classes.get(typedId)?.username || "Unknown Class";
+        id = typedId;
     }
-
     return {
         id,
         type: normalizedType,
@@ -1004,14 +1009,17 @@ async function awardDigipogs(awardData, user) {
         }
 
         try {
-            await dbRun("INSERT INTO transactions (from_id, to_id, from_type, to_type, amount, reason, date) VALUES (?, ?, ?, ?, ?, ?, ?)", [
+            await dbRun("INSERT INTO exchanges (from_user_id, from_type, offer, to_user_id, to_type, request, reason, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [
                 from,
+                'user',
+                JSON.stringify({0: amount}),
                 to.id,
-                "award",
                 to.type,
-                amount,
+                '{}',
                 reason,
-                Date.now(),
+                'completed',
+                new Date().toISOString(),
+                new Date().toISOString()
             ]);
         } catch (err) {
             return { success: true, message: "Award succeeded, but failed to log transaction." };
@@ -1214,14 +1222,8 @@ async function transferDigipogs(transferData, options = {}) {
         }
 
         try {
-            await dbRun("INSERT INTO transactions (from_id, from_type, to_id, to_type, amount, reason, date) VALUES (?, ?, ?, ?, ?, ?, ?)", [
-                from.id,
-                from.type,
-                to.id,
-                to.type,
-                amount,
-                reason,
-                Date.now(),
+            await dbRun("INSERT INTO exchanges (from_user_id, from_id, from_type, offer, to_user_id, to_id, to_type, request, reason, status, failure_reason, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [
+
             ]);
         } catch (err) {}
 
@@ -1254,7 +1256,6 @@ module.exports = {
     isPoolFoundedByUser,
     poolFounderCheck,
     isPoolUserTopHolder,
-    poolTopHolderCheck,
     addUserToPool,
     removeUserFromPool,
     setUserOwnerFlag,

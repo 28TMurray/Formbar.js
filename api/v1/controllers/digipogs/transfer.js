@@ -90,6 +90,7 @@ module.exports = (router) => {
         const body = { ...(req.body || {}) };
         delete body.pinVerified;
         const requestedFrom = normalizeTransferFrom(getTransferFromValue(body)) || (req.user?.oauth ? { id: req.user.id, type: "user" } : null);
+        requestedFrom.userId = req.user.id;
 
         if (!requestedFrom) {
             throw new AppError("Missing sender identifier.", {
