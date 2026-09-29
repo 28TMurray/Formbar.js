@@ -2,7 +2,7 @@ const { database, dbGetAll, dbGet, dbRun } = require("@modules/database");
 const { SCOPES, filterScopesByDomain, parseScopesField, TEACHER_PERMISSIONS } = require("@modules/permissions");
 const { getClassIDFromCode } = require("@services/classroom-service");
 const { getGlobalPermissionLevelForUser } = require("@modules/scope-resolver");
-const { compareBcrypt } = require("@modules/crypto");
+const { hashBcrypt, compareBcrypt } = require("@modules/crypto");
 const { digipogRateLimit } = require("@modules/config");
 const AppError = require("@errors/app-error");
 
@@ -268,18 +268,60 @@ function poolFounderCheck(req) {
  * @returns {Promise<boolean>} True if the user is a top shareholder of the pool.
  */
 async function isPoolUserTopHolder(poolId, userId) {
-    const row = await dbGet("SELECT user_id, share_item FROM digipog_pools WHERE pool_id=?", [poolId]);
+    const row = await dbGet("SELECT share_item FROM digipog_pools WHERE id=?", [poolId]);
     if (row.share_item == null) return isPoolFoundedByUser(poolId, userId);
     
-    const shareholders = await dbGetAll("SELECT user_id, quantity FROM inventory WHERE item_id=? ORDER BY quantity DESC", [shareItemId]);
+    const shareholders = await dbGetAll("SELECT user_id, quantity FROM inventory WHERE item_id=? ORDER BY quantity DESC", [row.share_item]);
     const maxQuantity = shareholders[0].quantity;
     
-    for (const shareholder of shareholder) {
+    for (const shareholder of shareholders) {
         if (shareholder.quantity < maxQuantity) break;
         if (shareholder.user_id === userId) return true;
     }
 
     return false;
+}
+
+/**
+ * Middleware-compatible founder check for pools.
+ * @param {Object} req - Express request object
+ * @returns {Promise<boolean>} Whether the requesting user founded the pool
+ */
+function poolTopHolderCheck(req) {
+    return isPoolUserTopHolder(Number(req.params.id), req.user.id);
+}
+
+/**
+ * Update a pool PIN after verifying the old PIN.
+ * @param {number} poolId - poolId.
+ * @param {string} oldPin - oldPin.
+ * @param {string} newPin - newPin.
+ * @returns {Promise<void>}
+ */
+async function updatePoolPin(poolId, oldPin, newPin) {
+    const pool = await getPoolById(poolId);
+    if (!pool) {
+        throw new NotFoundError("pool not found.", {
+            event: "pool.pin.update.failed",
+            reason: "pool_not_found",
+        });
+    }
+
+    // If pool already has a PIN, verify the old one matches
+    if (pool.pin) {
+        requireInternalParam(oldPin, "oldPin");
+        const oldPinMatches = await compareBcrypt(String(oldPin), pool.pin);
+        if (!oldPinMatches) {
+            const AuthError = require("@errors/auth-error");
+            throw new AuthError("Current PIN is incorrect.", {
+                event: "pool.pin.update.failed",
+                reason: "incorrect_old_pin",
+            });
+        }
+    }
+
+    const hashedPin = await hashBcrypt(String(newPin));
+    await dbRun("UPDATE digipog_pools SET pin = ? WHERE id = ?", [hashedPin, poolId]);
 }
 
 /**
@@ -1256,6 +1298,8 @@ module.exports = {
     isPoolFoundedByUser,
     poolFounderCheck,
     isPoolUserTopHolder,
+    poolTopHolderCheck,
+    updatePoolPin,
     addUserToPool,
     removeUserFromPool,
     setUserOwnerFlag,

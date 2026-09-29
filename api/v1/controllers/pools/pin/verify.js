@@ -1,28 +1,28 @@
-const { updatePoolPin, poolTopHolderCheck } = require("@services/digipog-service");
+const { verifyPoolPin, poolTopHolderCheck } = require("@services/digipog-service");
 const { isVerified, isAuthenticated } = require("@middleware/authentication");
+const { isValidPin } = require("@modules/pin-validation");
 const { SCOPES } = require("@modules/permissions");
 const { isOwnerOrHasScopes } = require("@middleware/permission-check");
-const { isValidPin } = require("@modules/pin-validation");
+const { requireQueryParam } = require("@modules/error-wrapper");
 const ValidationError = require("@errors/validation-error");
 const ForbiddenError = require("@errors/forbidden-error");
-const { requireQueryParam } = require("@modules/error-wrapper");
 
 /**
- * Register pin controller routes.
+ * Register verify controller routes.
  * @param {import("express").Router} router - router.
  * @returns {void}
  */
 module.exports = (router) => {
     /**
      * @swagger
-     * /api/v1/pool/{id}/pin:
-     *   patch:
-     *     summary: Update pool PIN
+     * /api/v1/user/{id}/pin/verify:
+     *   post:
+     *     summary: Verify user PIN for sensitive actions
      *     tags:
      *       - Pools
      *     description: |
-     *       Updates the authenticated top holder's pool PIN. Requires the current PIN if one is already set.
-     *       Top holders may only update their own pool PIN. The PIN must be 4-6 numeric digits.
+     *       Verifies the authenticated user's PIN before unlocking sensitive information.
+     *       Users may only verify the PIN for their own account.
      *     security:
      *       - bearerAuth: []
      *       - apiKeyAuth: []
@@ -30,7 +30,7 @@ module.exports = (router) => {
      *       - in: path
      *         name: id
      *         required: true
-     *         description: The ID of the pool whose PIN to update
+     *         description: The ID of the user whose PIN to verify
      *         schema:
      *           type: string
      *           example: "1"
@@ -43,17 +43,13 @@ module.exports = (router) => {
      *             required:
      *               - pin
      *             properties:
-     *               oldPin:
-     *                 type: string
-     *                 description: Current PIN (required if a PIN is already set)
-     *                 example: "1234"
      *               pin:
      *                 type: string
-     *                 description: New PIN (4-6 numeric digits)
-     *                 example: "5678"
+     *                 description: User PIN (4-6 numeric digits)
+     *                 example: "1234"
      *     responses:
      *       200:
-     *         description: PIN updated successfully
+     *         description: PIN verified successfully
      *         content:
      *           application/json:
      *             schema:
@@ -61,21 +57,21 @@ module.exports = (router) => {
      *               properties:
      *                 message:
      *                   type: string
-     *                   example: "PIN updated successfully."
+     *                   example: "PIN verified successfully."
      *       400:
-     *         description: Validation error (missing or invalid PIN format)
+     *         description: Validation error (invalid PIN format or PIN not configured)
      *         content:
      *           application/json:
      *             schema:
      *               $ref: '#/components/schemas/Error'
      *       401:
-     *         description: Current PIN is incorrect
+     *         description: PIN is incorrect
      *         content:
      *           application/json:
      *             schema:
      *               $ref: '#/components/schemas/UnauthorizedError'
      *       403:
-     *         description: Cannot modify pool if not top holder
+     *         description: Cannot verify another user's PIN
      *         content:
      *           application/json:
      *             schema:
@@ -87,31 +83,30 @@ module.exports = (router) => {
      *             schema:
      *               $ref: '#/components/schemas/ServerError'
      */
-    router.patch("/pool/:id/pin", 
+    router.post("/pool/:id/pin/verify", 
         isAuthenticated, 
         isVerified, 
-        isOwnerOrHasScopes(poolTopHolderCheck, SCOPES.GLOBAL.SYSTEM.ADMIN, "You do not have enough shares to own this pool."), 
+        isOwnerOrHasScopes(poolTopHolderCheck, SCOPES.GLOBAL.SYSTEM.ADMIN, "You do not have enough shares to own this pool."),
         async (req, res) => {
             const targetPoolId = Number(req.params.id);
             requireQueryParam(targetPoolId, "id");
 
-            const { oldPin, pin } = req.body;
-
+            const { pin } = req.body || {};
             if (!isValidPin(pin)) {
                 throw new ValidationError("Invalid PIN format. PIN must be 4-6 numeric digits.", {
-                    event: "user.pin.update.failed",
+                    event: "pool.pin.verify.failed",
                     reason: "invalid_pin_format",
                 });
             }
 
-            req.infoEvent("pool.pin.update.attempt", "Attempting to update pool PIN", { poolId: targetPoolId });
-            await updatePoolPin(targetPoolId, oldPin, pin);
+            req.infoEvent("pool.pin.verify.attempt", "Attempting to verify PIN", { poolId: targetPoolId });
+            await verifyPoolPin(targetPoolId, pin);
 
-            req.infoEvent("pool.pin.update.success", "PIN updated successfully");
+            req.infoEvent("pool.pin.verify.success", "PIN verified successfully", { poolId: targetPoolId });
             res.status(200).json({
                 success: true,
                 data: {
-                    message: "PIN updated successfully.",
+                    message: "PIN verified successfully.",
                 },
             });
         }
