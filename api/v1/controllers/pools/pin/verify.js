@@ -30,7 +30,7 @@ module.exports = (router) => {
      *       - in: path
      *         name: id
      *         required: true
-     *         description: The ID of the user whose PIN to verify
+     *         description: The ID of the pool whose PIN to verify
      *         schema:
      *           type: string
      *           example: "1"
@@ -45,7 +45,7 @@ module.exports = (router) => {
      *             properties:
      *               pin:
      *                 type: string
-     *                 description: User PIN (4-6 numeric digits)
+     *                 description: Pool PIN (4-6 numeric digits)
      *                 example: "1234"
      *     responses:
      *       200:

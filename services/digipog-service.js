@@ -309,7 +309,13 @@ async function updatePoolPin(poolId, oldPin, newPin) {
 
     // If pool already has a PIN, verify the old one matches
     if (pool.pin) {
-        requireInternalParam(oldPin, "oldPin");
+        if (oldPin == null) {
+            const ValidationError = require("@errors/validation-error");
+            throw new ValidationError("Missing the current PIN", {
+                event: "pool.pin.update.failed",
+                reason: "missing_old_pin",
+            });
+        }
         const oldPinMatches = await compareBcrypt(String(oldPin), pool.pin);
         if (!oldPinMatches) {
             const AuthError = require("@errors/auth-error");
@@ -322,6 +328,41 @@ async function updatePoolPin(poolId, oldPin, newPin) {
 
     const hashedPin = await hashBcrypt(String(newPin));
     await dbRun("UPDATE digipog_pools SET pin = ? WHERE id = ?", [hashedPin, poolId]);
+}
+
+/**
+ * Verify a user PIN.
+ * @param {number} poolId - poolId.
+ * @param {string} pin - pin.
+ * @returns {Promise<boolean>}
+ */
+async function verifyPoolPin(poolId, pin) {
+    const pool = await getPoolById(poolId);
+    if (!pool) {
+        throw new NotFoundError("pool not found.", {
+            event: "pool.pin.verify.failed",
+            reason: "pool_not_found",
+        });
+    }
+
+    if (!pool.pin) {
+        throw new AppError("No PIN is set for this account. Please create one first.", {
+            statusCode: 400,
+            event: "user.pin.verify.failed",
+            reason: "pin_not_set",
+        });
+    }
+
+    const pinMatches = await compareBcrypt(String(pin), pool.pin);
+    if (!pinMatches) {
+        const AuthError = require("@errors/auth-error");
+        throw new AuthError("PIN is incorrect.", {
+            event: "pool.pin.verify.failed",
+            reason: "incorrect_pin",
+        });
+    }
+
+    return true;
 }
 
 /**
@@ -1175,24 +1216,11 @@ async function transferDigipogs(transferData, options = {}) {
                 return { success: false, message: "Sender account not found." };
             }
         } else {
-            fromAccount = await dbGet("SELECT id, amount FROM digipog_pools WHERE id = ?", [from.id]);
+            fromAccount = await dbGet("SELECT id, amount, pin FROM digipog_pools WHERE id = ?", [from.id]);
             if (!fromAccount) {
                 recordAttempt(accountId, false);
                 return { success: false, message: "Sender pool not found." };
             }
-            const poolOwner = await dbGet(
-                `SELECT u.pin
-                 FROM digipog_pool_users dpu
-                 JOIN users u ON u.id = dpu.user_id
-                 WHERE dpu.pool_id = ? AND dpu.owner = 1
-                 LIMIT 1`,
-                [from.id]
-            );
-            if (!poolOwner) {
-                recordAttempt(accountId, false);
-                return { success: false, message: "Sender pool owner not found." };
-            }
-            fromAccount.pin = poolOwner.pin;
         }
 
         if (!pinVerified && !fromAccount.pin) {
@@ -1217,15 +1245,29 @@ async function transferDigipogs(transferData, options = {}) {
         let toAccount;
         if (to.type === "user") {
             toAccount = await dbGet("SELECT id FROM users WHERE id = ?", [to.id]);
+
             if (!toAccount) {
                 recordAttempt(accountId, false);
                 return { success: false, message: "Recipient account not found." };
             }
+
+            toAccount.userId = toAccount.id;
         } else {
             toAccount = await dbGet("SELECT id FROM digipog_pools WHERE id = ?", [to.id]);
+            
             if (!toAccount) {
                 recordAttempt(accountId, false);
                 return { success: false, message: "Recipient pool not found." };
+            }
+            
+            // return founder if no share item
+            const row = await dbGet("SELECT share_item FROM digipog_pools WHERE id = ?", [toAccount.id]);
+            if (row.share_item == null) {
+                const { userId } = await dbGet("SELECT user_id AS userId FROM digipog_pool_users WHERE pool_id = ? AND owner = 1 LIMIT 1", [to.id]);
+                toAccount.userId = userId;
+            } else {    
+                const { userId } = await dbGet("SELECT user_id AS userId FROM inventory WHERE item_id = ? ORDER BY quantity DESC", [row.share_item]);
+                toAccount.userId = userId;
             }
         }
 
@@ -1264,8 +1306,19 @@ async function transferDigipogs(transferData, options = {}) {
         }
 
         try {
-            await dbRun("INSERT INTO exchanges (from_user_id, from_id, from_type, offer, to_user_id, to_id, to_type, request, reason, status, failure_reason, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [
-
+            await dbRun("INSERT INTO exchanges (from_user_id, from_id, from_type, offer, to_user_id, to_id, to_type, request, reason, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [
+                from.userId,
+                fromAccount.id,
+                from.type,
+                JSON.stringify({0: amount}),
+                toAccount.userId,
+                to.type !== "user" ? toAccount.id : null,
+                to.type,
+                JSON.stringify({}),
+                transferData.reason,
+                "completed",
+                new Date().toISOString(),
+                new Date().toISOString()
             ]);
         } catch (err) {}
 
@@ -1275,6 +1328,7 @@ async function transferDigipogs(transferData, options = {}) {
             message: `Transfer successful. ${deprecatedFormatUsed ? "Warning: Deprecated transfer format used. See documentation for updated usage." : ""}`,
         };
     } catch (err) {
+        console.log(err);
         return { success: false, message: "Database error." };
     }
 }
@@ -1300,6 +1354,7 @@ module.exports = {
     isPoolUserTopHolder,
     poolTopHolderCheck,
     updatePoolPin,
+    verifyPoolPin,
     addUserToPool,
     removeUserFromPool,
     setUserOwnerFlag,
