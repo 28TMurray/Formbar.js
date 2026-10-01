@@ -1,11 +1,12 @@
 const { dbGet, dbGetAll, dbRun } = require("@modules/database");
 const { buildPagination } = require("@modules/pagination");
-const { creditDigipogTransferRecipient, isPoolFoundedByUser } = require("@services/digipog-service");
+const { creditDigipogTransferRecipient, isPoolFoundedByUser, isPoolUserTopHolder } = require("@services/digipog-service");
 const { addItemToInventory } = require("@services/inventory-service");
 const { createNotification } = require("@services/notification-service");
 const NotFoundError = require("@errors/not-found-error");
 const ValidationError = require("@errors/validation-error");
 const ForbiddenError = require("@errors/forbidden-error");
+const request = require("@controllers/class/break/request");
 
 /**
  * Aggregate duplicate item IDs in an items array and validate each entry.
@@ -161,9 +162,9 @@ async function validateSide(side, userId, label) {
             throw new ValidationError(`The ${label} pool was not found.`, { reason: "pool_not_found" });
         }
 
-        const isOwner = await isPoolFoundedByUser(poolId, userId);
+        const isOwner = await isPoolUserTopHolder(poolId, userId);
         if (!isOwner) {
-            throw new ValidationError(`The ${label} pool must be owned by the ${label === "offered" ? "requester" : "recipient"}.`, {
+            throw new ValidationError(`The ${label === "offered" ? "requester" : "recipient"} must be a top holder of the ${label} pool.`, {
                 reason: "pool_not_owned",
             });
         }
@@ -200,28 +201,37 @@ async function checkPoolBalanceAvailability(poolId, amount) {
 function formatTrade(row) {
     const offered = {
         source: {
-            type: row.from_source_type,
-            ...(row.from_pool_id != null ? { poolId: row.from_pool_id } : {}),
+            type: row.from_type,
+            ...(row.from_pool_id != null ? { poolId: row.from_id } : {}),
         },
     };
 
-    if (row.from_source_type === "inventory") {
-        offered.items = row.offered_items ? JSON.parse(row.offered_items) : [];
-    } else {
-        offered.digipogs = row.offered_digipogs;
+    offered.items = [];
+
+    for (const [itemId, quantity] of Object.entries(JSON.parse(row.offer))) {
+        if (itemId === "0") {
+            offered.digipogs = quantity;
+        } else {
+            if (offered.items == null) offered.items = [];
+            offered.items.push({itemId, quantity});
+        }
     }
 
     const requested = {
         source: {
-            type: row.to_source_type,
-            ...(row.to_pool_id != null ? { poolId: row.to_pool_id } : {}),
+            type: row.to_type,
+            ...(row.to_id != null ? { poolId: row.to_id } : {}),
         },
     };
 
-    if (row.to_source_type === "inventory") {
-        requested.items = row.requested_items ? JSON.parse(row.requested_items) : [];
-    } else {
-        requested.digipogs = row.requested_digipogs;
+    
+    for (const [itemId, quantity] of Object.entries(JSON.parse(row.request))) {
+        if (itemId === "0") {
+            requested.digipogs = quantity;
+        } else {
+            if (requested.items == null) requested.items = [];
+            requested.items.push({itemId, quantity});
+        }
     }
 
     return {
@@ -278,6 +288,18 @@ async function createTrade({ fromUserId, toUserId, offered, requested }) {
         validateSide(requested, toUserId, "requested"),
     ]);
 
+    const exchangeOffer = {};
+    for (const { itemId, quantity } of offeredSide.items ?? []) {
+        exchangeOffer[itemId] = quantity;
+    }
+    if (offeredSide.digipogs) exchangeOffer["0"] = offeredSide.digipogs;
+
+    const exchangeRequest = {};
+    for (const { itemId, quantity } of requestedSide.items ?? []) {
+        exchangeRequest[itemId] = quantity;
+    }
+    if (requestedSide.digipogs) exchangeRequest["0"] = requestedSide.digipogs;
+
     // Create-time availability checks (no debits).
     if (offeredSide.sourceType === "inventory") {
         await checkInventoryAvailability(fromUserId, offeredSide.items);
@@ -293,21 +315,18 @@ async function createTrade({ fromUserId, toUserId, offered, requested }) {
 
     const now = new Date().toISOString();
     const tradeId = await dbRun(
-        `INSERT INTO trades (from_user, to_user, from_source_type, from_pool_id, to_source_type, to_pool_id,
-                             offered_items, requested_items, offered_digipogs, requested_digipogs,
-                             status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+        `INSERT INTO exchanges (from_user_id, from_id, from_type, offer, to_user_id, to_id, to_type,
+                                request, reason, status, created_at, updated_at) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Trade', 'pending', ?, ?)`,
         [
             fromUserId,
-            toUserId,
-            offeredSide.sourceType,
             offeredSide.poolId,
-            requestedSide.sourceType,
+            offeredSide.sourceType === "inventory" ? "user" : offeredSide.sourceType,
+            JSON.stringify(exchangeOffer),
+            toUserId,
             requestedSide.poolId,
-            offeredSide.items ? JSON.stringify(offeredSide.items) : null,
-            requestedSide.items ? JSON.stringify(requestedSide.items) : null,
-            offeredSide.digipogs,
-            requestedSide.digipogs,
+            offeredSide.sourceType === "inventory" ? "user" : offeredSide.sourceType,
+            JSON.stringify(exchangeRequest),
             now,
             now,
         ]
@@ -328,28 +347,29 @@ async function createTrade({ fromUserId, toUserId, offered, requested }) {
  * @returns {Promise<Object>}
  */
 async function getTradesForUser(userId, { limit = 20, offset = 0 } = {}) {
+    // REPLACE trades
     const [inboundCount, inbound, outboundCount, outbound, completedCount, completed, inactiveCount, inactive] = await Promise.all([
-        dbGet("SELECT COUNT(*) AS count FROM trades WHERE to_user = ? AND status = 'pending'", [userId]),
-        dbGetAll("SELECT * FROM trades WHERE to_user = ? AND status = 'pending' ORDER BY created_at DESC LIMIT ? OFFSET ?", [userId, limit, offset]),
-        dbGet("SELECT COUNT(*) AS count FROM trades WHERE from_user = ? AND status = 'pending'", [userId]),
-        dbGetAll("SELECT * FROM trades WHERE from_user = ? AND status = 'pending' ORDER BY created_at DESC LIMIT ? OFFSET ?", [
+        dbGet("SELECT COUNT(*) AS count FROM exchanges WHERE to_user_id = ? AND status = 'pending'", [userId]),
+        dbGetAll("SELECT * FROM exchanges WHERE to_user_id = ? AND status = 'pending' ORDER BY created_at DESC LIMIT ? OFFSET ?", [userId, limit, offset]),
+        dbGet("SELECT COUNT(*) AS count FROM exchanges WHERE from_user_id = ? AND status = 'pending'", [userId]),
+        dbGetAll("SELECT * FROM exchanges WHERE from_user_id = ? AND status = 'pending' ORDER BY created_at DESC LIMIT ? OFFSET ?", [
             userId,
             limit,
             offset,
         ]),
-        dbGet("SELECT COUNT(*) AS count FROM trades WHERE (from_user = ? OR to_user = ?) AND status = 'completed'", [userId, userId]),
-        dbGetAll("SELECT * FROM trades WHERE (from_user = ? OR to_user = ?) AND status = 'completed' ORDER BY updated_at DESC LIMIT ? OFFSET ?", [
+        dbGet("SELECT COUNT(*) AS count FROM exchanges WHERE (from_user_id = ? OR to_user_id = ?) AND status = 'completed'", [userId, userId]),
+        dbGetAll("SELECT * FROM exchanges WHERE (from_user_id = ? OR to_user_id = ?) AND status = 'completed' ORDER BY updated_at DESC LIMIT ? OFFSET ?", [
             userId,
             userId,
             limit,
             offset,
         ]),
-        dbGet("SELECT COUNT(*) AS count FROM trades WHERE (from_user = ? OR to_user = ?) AND status IN ('rejected', 'canceled', 'failed')", [
+        dbGet("SELECT COUNT(*) AS count FROM exchanges WHERE (from_user_id = ? OR to_user_id = ?) AND status IN ('rejected', 'canceled', 'failed')", [
             userId,
             userId,
         ]),
         dbGetAll(
-            "SELECT * FROM trades WHERE (from_user = ? OR to_user = ?) AND status IN ('rejected', 'canceled', 'failed') ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+            "SELECT * FROM exchanges WHERE (from_user_id = ? OR to_user_id = ?) AND status IN ('rejected', 'canceled', 'failed') ORDER BY updated_at DESC LIMIT ? OFFSET ?",
             [userId, userId, limit, offset]
         ),
     ]);
@@ -370,6 +390,7 @@ async function getTradesForUser(userId, { limit = 20, offset = 0 } = {}) {
  * @returns {Promise<Object|null>}
  */
 async function getTradeById(tradeId, userId) {
+    // REPLACE trades
     const row = await dbGet("SELECT * FROM trades WHERE id = ?", [tradeId]);
     if (!row || (row.from_user !== userId && row.to_user !== userId)) {
         return null;
@@ -392,7 +413,7 @@ async function acceptTrade(tradeId, userId) {
 
     try {
         await dbRun("BEGIN IMMEDIATE TRANSACTION");
-
+        // REPLACE trades
         const trade = await dbGet("SELECT * FROM trades WHERE id = ?", [tradeId]);
 
         if (!trade || (trade.from_user !== userId && trade.to_user !== userId)) {
@@ -417,6 +438,7 @@ async function acceptTrade(tradeId, userId) {
          * result object so callers can return immediately after this helper.
          */
         async function failTrade(reason) {
+            // REPLACE trades
             await dbRun("UPDATE trades SET status = 'failed', failure_reason = ?, updated_at = ? WHERE id = ?", [reason, now, tradeId]);
             await dbRun("COMMIT");
             await Promise.allSettled([
@@ -435,9 +457,9 @@ async function acceptTrade(tradeId, userId) {
                 }
             }
         } else {
-            const stillOwner = await isPoolFoundedByUser(trade.from_pool_id, fromUserId);
+            const stillOwner = await isPoolUserTopHolder(trade.from_pool_id, fromUserId);
             if (!stillOwner) {
-                return await failTrade("Requester no longer owns the source pool.");
+                return await failTrade("Requester is no longer a top holder.");
             }
             const pool = await dbGet("SELECT amount FROM digipog_pools WHERE id = ?", [trade.from_pool_id]);
             if (!pool || pool.amount < trade.offered_digipogs) {
@@ -509,7 +531,7 @@ async function acceptTrade(tradeId, userId) {
                 trade.from_source_type === "pool" ? trade.from_pool_id : fromUserId
             );
         }
-
+        // REPLACE trades
         await dbRun("UPDATE trades SET status = 'completed', updated_at = ? WHERE id = ?", [now, tradeId]);
         await dbRun("COMMIT");
     } catch (err) {
@@ -539,7 +561,7 @@ async function rejectTrade(tradeId, userId) {
 
     try {
         await dbRun("BEGIN IMMEDIATE TRANSACTION");
-
+        // REPLACE trades
         const trade = await dbGet("SELECT * FROM trades WHERE id = ?", [tradeId]);
 
         if (!trade || (trade.from_user !== userId && trade.to_user !== userId)) {
@@ -555,6 +577,7 @@ async function rejectTrade(tradeId, userId) {
         }
 
         requesterId = trade.from_user;
+        // REPLACE trades
         await dbRun("UPDATE trades SET status = 'rejected', updated_at = ? WHERE id = ?", [now, tradeId]);
         await dbRun("COMMIT");
     } catch (err) {
@@ -581,7 +604,7 @@ async function cancelTrade(tradeId, userId) {
 
     try {
         await dbRun("BEGIN IMMEDIATE TRANSACTION");
-
+        // REPLACE trades
         const trade = await dbGet("SELECT * FROM trades WHERE id = ?", [tradeId]);
 
         if (!trade || (trade.from_user !== userId && trade.to_user !== userId)) {
@@ -595,6 +618,7 @@ async function cancelTrade(tradeId, userId) {
         }
 
         recipientId = trade.to_user;
+        // REPLACE trades
         await dbRun("UPDATE trades SET status = 'canceled', updated_at = ? WHERE id = ?", [now, tradeId]);
         await dbRun("COMMIT");
     } catch (err) {

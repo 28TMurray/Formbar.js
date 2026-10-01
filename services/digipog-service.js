@@ -1210,7 +1210,7 @@ async function transferDigipogs(transferData, options = {}) {
 
         let fromAccount;
         if (from.type === "user") {
-            fromAccount = await dbGet("SELECT id, digipogs, pin FROM users WHERE id = ?", [from.id]);
+            fromAccount = await dbGet("SELECT id AS userId, digipogs, pin FROM users WHERE id = ?", [from.id]);
             if (!fromAccount) {
                 recordAttempt(accountId, false);
                 return { success: false, message: "Sender account not found." };
@@ -1244,14 +1244,12 @@ async function transferDigipogs(transferData, options = {}) {
 
         let toAccount;
         if (to.type === "user") {
-            toAccount = await dbGet("SELECT id FROM users WHERE id = ?", [to.id]);
-
+            const toAccount = await dbGet("SELECT id AS userId FROM users WHERE id = ?", [to.id]);
+            
             if (!toAccount) {
                 recordAttempt(accountId, false);
                 return { success: false, message: "Recipient account not found." };
             }
-
-            toAccount.userId = toAccount.id;
         } else {
             toAccount = await dbGet("SELECT id FROM digipog_pools WHERE id = ?", [to.id]);
             
@@ -1312,7 +1310,7 @@ async function transferDigipogs(transferData, options = {}) {
                 from.type,
                 JSON.stringify({0: amount}),
                 toAccount.userId,
-                to.type !== "user" ? toAccount.id : null,
+                toAccount.id,
                 to.type,
                 JSON.stringify({}),
                 transferData.reason,

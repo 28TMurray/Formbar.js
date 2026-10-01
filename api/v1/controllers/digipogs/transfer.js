@@ -10,14 +10,6 @@ const { isAuthenticated } = require("@middleware/authentication");
  * @returns {void}
  */
 module.exports = (router) => {
-    function authenticateIfBearerToken(req, res, next) {
-        if (!req.headers.authorization) {
-            return next();
-        }
-
-        return isAuthenticated(req, res, next);
-    }
-
     /**
      * @swagger
      * /api/v1/digipogs/transfer:
