@@ -194,6 +194,26 @@ async function checkPoolBalanceAvailability(poolId, amount) {
 }
 
 /**
+ * Format an exchange payload into the old trade payload
+ * @param {Object} party
+ * @returns {Object}
+ */
+function formatTradePayload(party) {
+    let payload = {};
+    
+    for (const [itemId, quantity] of Object.entries(JSON.parse(party))) {
+        if (itemId === "0") {
+            payload.digipogs = quantity;
+        } else {
+            payload.items ??= [];
+            payload.items.push({itemId, quantity});
+        }
+    }
+
+    return payload
+}
+
+/**
  * Format a raw database trade row into the public API shape.
  * @param {Object} row
  * @returns {Object}
@@ -201,38 +221,19 @@ async function checkPoolBalanceAvailability(poolId, amount) {
 function formatTrade(row) {
     const offered = {
         source: {
-            type: row.from_type,
+            type: row.from_type === "user" ? "inventory" : row.from_type,
             ...(row.from_pool_id != null ? { poolId: row.from_id } : {}),
         },
+        ...formatTradePayload(row.offer),
     };
-
-    offered.items = [];
-
-    for (const [itemId, quantity] of Object.entries(JSON.parse(row.offer))) {
-        if (itemId === "0") {
-            offered.digipogs = quantity;
-        } else {
-            if (offered.items == null) offered.items = [];
-            offered.items.push({itemId, quantity});
-        }
-    }
 
     const requested = {
         source: {
-            type: row.to_type,
+            type: row.to_type === "user" ? "inventory" : row.to_type,
             ...(row.to_id != null ? { poolId: row.to_id } : {}),
         },
+        ...formatTradePayload(row.request),
     };
-
-    
-    for (const [itemId, quantity] of Object.entries(JSON.parse(row.request))) {
-        if (itemId === "0") {
-            requested.digipogs = quantity;
-        } else {
-            if (requested.items == null) requested.items = [];
-            requested.items.push({itemId, quantity});
-        }
-    }
 
     return {
         id: row.id,
@@ -347,7 +348,6 @@ async function createTrade({ fromUserId, toUserId, offered, requested }) {
  * @returns {Promise<Object>}
  */
 async function getTradesForUser(userId, { limit = 20, offset = 0 } = {}) {
-    // REPLACE trades
     const [inboundCount, inbound, outboundCount, outbound, completedCount, completed, inactiveCount, inactive] = await Promise.all([
         dbGet("SELECT COUNT(*) AS count FROM exchanges WHERE to_user_id = ? AND status = 'pending'", [userId]),
         dbGetAll("SELECT * FROM exchanges WHERE to_user_id = ? AND status = 'pending' ORDER BY created_at DESC LIMIT ? OFFSET ?", [userId, limit, offset]),
@@ -357,8 +357,8 @@ async function getTradesForUser(userId, { limit = 20, offset = 0 } = {}) {
             limit,
             offset,
         ]),
-        dbGet("SELECT COUNT(*) AS count FROM exchanges WHERE (from_user_id = ? OR to_user_id = ?) AND status = 'completed'", [userId, userId]),
-        dbGetAll("SELECT * FROM exchanges WHERE (from_user_id = ? OR to_user_id = ?) AND status = 'completed' ORDER BY updated_at DESC LIMIT ? OFFSET ?", [
+        dbGet("SELECT COUNT(*) AS count FROM exchanges WHERE (from_user_id = ? OR to_user_id = ?) AND status = 'completed' AND request != '{}'", [userId, userId]),
+        dbGetAll("SELECT * FROM exchanges WHERE (from_user_id = ? OR to_user_id = ?) AND status = 'completed' AND request != '{}' ORDER BY updated_at DESC LIMIT ? OFFSET ?", [
             userId,
             userId,
             limit,
@@ -390,9 +390,8 @@ async function getTradesForUser(userId, { limit = 20, offset = 0 } = {}) {
  * @returns {Promise<Object|null>}
  */
 async function getTradeById(tradeId, userId) {
-    // REPLACE trades
-    const row = await dbGet("SELECT * FROM trades WHERE id = ?", [tradeId]);
-    if (!row || (row.from_user !== userId && row.to_user !== userId)) {
+    const row = await dbGet("SELECT * FROM exchanges WHERE id = ?", [tradeId]);
+    if (!row || (row.from_user_id !== userId && row.to_user_id !== userId)) {
         return null;
     }
     return formatTrade(row);
@@ -413,14 +412,14 @@ async function acceptTrade(tradeId, userId) {
 
     try {
         await dbRun("BEGIN IMMEDIATE TRANSACTION");
-        // REPLACE trades
-        const trade = await dbGet("SELECT * FROM trades WHERE id = ?", [tradeId]);
 
-        if (!trade || (trade.from_user !== userId && trade.to_user !== userId)) {
+        const trade = await dbGet("SELECT * FROM exchanges WHERE id = ?", [tradeId]);
+
+        if (!trade || (trade.from_user_id !== userId && trade.to_user_id !== userId)) {
             throw new NotFoundError("Trade not found.");
         }
 
-        if (trade.to_user !== userId) {
+        if (trade.to_user_id !== userId) {
             throw new ForbiddenError("Only the recipient can accept a trade.", { reason: "not_recipient" });
         }
 
@@ -428,18 +427,32 @@ async function acceptTrade(tradeId, userId) {
             throw new ValidationError("This trade is no longer pending.", { reason: "invalid_status", status: trade.status });
         }
 
-        fromUserId = trade.from_user;
-        toUserId = trade.to_user;
-        const offeredItems = trade.from_source_type === "inventory" ? JSON.parse(trade.offered_items || "[]") : [];
-        const requestedItems = trade.to_source_type === "inventory" ? JSON.parse(trade.requested_items || "[]") : [];
+        fromUserId = trade.from_user_id;
+        toUserId = trade.to_user_id;
+        const offer = JSON.parse(trade.offer);
+        const request = JSON.parse(trade.request);
 
+        // Helper for filtering non-digipog
+        function getPayloadItems(payload) {
+            return Object.entries(payload).reduce((items, [itemId, quantity]) => {
+                if (itemId !== "0") {
+                    items[itemId] = quantity
+                }
+                return items;
+            });
+        }
+        
+        const offerItems = getPayloadItems(offer);
+        const requestItems = getPayloadItems(request);
+        const offerDigipogs = offer["0"] ?? 0;
+        const requestDigipogs = request["0"] ?? 0;
+        
         /**
          * Mark the trade as failed, commit, and notify both participants. Returns a
          * result object so callers can return immediately after this helper.
          */
         async function failTrade(reason) {
-            // REPLACE trades
-            await dbRun("UPDATE trades SET status = 'failed', failure_reason = ?, updated_at = ? WHERE id = ?", [reason, now, tradeId]);
+            await dbRun("UPDATE exchanges SET status = 'failed', failure_reason = ?, updated_at = ? WHERE id = ?", [reason, now, tradeId]);
             await dbRun("COMMIT");
             await Promise.allSettled([
                 createNotification(fromUserId, "trade_failed", { tradeId, reason }),
@@ -449,90 +462,90 @@ async function acceptTrade(tradeId, userId) {
         }
 
         // Re-check offered (from) side.
-        if (trade.from_source_type === "inventory") {
-            for (const { itemId, quantity } of offeredItems) {
+        if (trade.from_type === "user") {
+            for (const [ itemId, quantity ] of Object.entries(offerItems)) {
                 const total = await getInventoryTotal(fromUserId, itemId);
                 if (total < quantity) {
                     return await failTrade("Requester no longer has sufficient inventory.");
                 }
             }
         } else {
-            const stillOwner = await isPoolUserTopHolder(trade.from_pool_id, fromUserId);
+            const stillOwner = await isPoolUserTopHolder(trade.from_id, fromUserId);
             if (!stillOwner) {
                 return await failTrade("Requester is no longer a top holder.");
             }
-            const pool = await dbGet("SELECT amount FROM digipog_pools WHERE id = ?", [trade.from_pool_id]);
-            if (!pool || pool.amount < trade.offered_digipogs) {
+            const pool = await dbGet("SELECT amount FROM digipog_pools WHERE id = ?", [trade.from_id]);
+            if (!pool || pool.amount < offerDigipogs) {
                 return await failTrade("Requester's pool no longer has sufficient balance.");
             }
         }
 
         // Re-check requested (to) side.
-        if (trade.to_source_type === "inventory") {
-            for (const { itemId, quantity } of requestedItems) {
+        if (trade.to_type === "user") {
+            for (const [ itemId, quantity ] of Object.entries(requestItems)) {
                 const total = await getInventoryTotal(toUserId, itemId);
                 if (total < quantity) {
-                    return await failTrade("Recipient no longer has sufficient inventory.");
+                    return await failTrade("Recipient no longer has sufficient user.");
                 }
             }
         } else {
-            const stillOwner = await isPoolFoundedByUser(trade.to_pool_id, toUserId);
+            const stillOwner = await isPoolUserTopHolder(trade.to_id, toUserId);
             if (!stillOwner) {
-                return await failTrade("Recipient no longer owns the source pool.");
+                return await failTrade("Recipient is no longer a top holder.");
             }
-            const pool = await dbGet("SELECT amount FROM digipog_pools WHERE id = ?", [trade.to_pool_id]);
-            if (!pool || pool.amount < trade.requested_digipogs) {
+            const pool = await dbGet("SELECT amount FROM digipog_pools WHERE id = ?", [trade.to_id]);
+            if (!pool || pool.amount < requestDigipogs) {
                 return await failTrade("Recipient's pool no longer has sufficient balance.");
             }
         }
 
-        if (trade.from_source_type === "inventory") {
-            for (const { itemId, quantity } of offeredItems) {
+        if (trade.from_type === "user") {
+            for (const [ itemId, quantity ] of Object.entries(offerItems)) {
                 await strictRemoveFromInventory(fromUserId, itemId, quantity);
             }
         } else {
-            await dbRun("UPDATE digipog_pools SET amount = amount - ? WHERE id = ?", [trade.offered_digipogs, trade.from_pool_id]);
+            await dbRun("UPDATE digipog_pools SET amount = amount - ? WHERE id = ?", [offerDigipogs, trade.from_id]);
         }
 
-        if (trade.to_source_type === "inventory") {
-            for (const { itemId, quantity } of requestedItems) {
+        if (trade.to_type === "user") {
+            for (const [ itemId, quantity ] of Object.entries(requestItems)) {
                 await strictRemoveFromInventory(toUserId, itemId, quantity);
             }
         } else {
-            await dbRun("UPDATE digipog_pools SET amount = amount - ? WHERE id = ?", [trade.requested_digipogs, trade.to_pool_id]);
+            await dbRun("UPDATE digipog_pools SET amount = amount - ? WHERE id = ?", [requestDigipogs, trade.to_id]);
         }
 
         // toUser receives whatever fromUser offered.
-        if (trade.from_source_type === "inventory") {
-            for (const { itemId, quantity } of offeredItems) {
+        if (trade.from_type === "user") {
+            for (const [ itemId, quantity ] of Object.entries(offerItems)) {
                 await addItemToInventory(toUserId, itemId, quantity);
             }
         } else {
             // Digipogs from fromUser's pool go to toUser; credit destination depends
             // on toUser's own source type.
             await creditDigipogTransferRecipient(
-                trade.offered_digipogs,
-                trade.to_source_type === "pool" ? "pool" : "user",
-                trade.to_source_type === "pool" ? trade.to_pool_id : toUserId
+                offerDigipogs,
+                trade.to_type,
+                trade.to_type === "pool" ? trade.to_id : toUserId
             );
         }
 
         // fromUser receives whatever toUser offered.
-        if (trade.to_source_type === "inventory") {
-            for (const { itemId, quantity } of requestedItems) {
+        if (trade.to_type === "user") {
+            for (const [ itemId, quantity ] of Object.entries(requestItems)) {
                 await addItemToInventory(fromUserId, itemId, quantity);
             }
         } else {
             // Digipogs from toUser's pool go to fromUser; credit destination depends
             // on fromUser's own source type.
             await creditDigipogTransferRecipient(
-                trade.requested_digipogs,
-                trade.from_source_type === "pool" ? "pool" : "user",
-                trade.from_source_type === "pool" ? trade.from_pool_id : fromUserId
+                requestDigipogs,
+                trade.from_type === "pool" ? "pool" : "user",
+                trade.from_type === "pool" ? trade.from_id : fromUserId
             );
         }
-        // REPLACE trades
-        await dbRun("UPDATE trades SET status = 'completed', updated_at = ? WHERE id = ?", [now, tradeId]);
+
+        await dbRun("UPDATE exchanges SET status = 'completed', updated_at = ? WHERE id = ?", [now, tradeId]);
         await dbRun("COMMIT");
     } catch (err) {
         try {
@@ -561,24 +574,30 @@ async function rejectTrade(tradeId, userId) {
 
     try {
         await dbRun("BEGIN IMMEDIATE TRANSACTION");
-        // REPLACE trades
-        const trade = await dbGet("SELECT * FROM trades WHERE id = ?", [tradeId]);
 
-        if (!trade || (trade.from_user !== userId && trade.to_user !== userId)) {
+        const trade = await dbGet("SELECT * FROM exchanges WHERE id = ?", [tradeId]);
+
+        if (!trade || (trade.from_user_id !== userId && trade.to_user_id !== userId)) {
             throw new NotFoundError("Trade not found.");
         }
 
-        if (trade.to_user !== userId) {
-            throw new ForbiddenError("Only the recipient can reject a trade.", { reason: "not_recipient" });
+        if (trade.to_type === "user") {
+            if (trade.to_user_id !== userId) {
+                throw new ForbiddenError("Only the recipient can reject a trade.", { reason: "not_recipient" });
+            }
+        } else {
+            const isStillTopHolder = isPoolUserTopHolder(trade.to_id, trade.to_user_id);
+            if (!isStillTopHolder)
+                throw new ForbiddenError("Only the top pool holder can reject a trade.", { reason: "not_recipient" });
         }
 
         if (trade.status !== "pending") {
             throw new ValidationError("This trade is no longer pending.", { reason: "invalid_status", status: trade.status });
         }
 
-        requesterId = trade.from_user;
-        // REPLACE trades
-        await dbRun("UPDATE trades SET status = 'rejected', updated_at = ? WHERE id = ?", [now, tradeId]);
+        requesterId = trade.from_user_id;
+
+        await dbRun("UPDATE exchanges SET status = 'rejected', updated_at = ? WHERE id = ?", [now, tradeId]);
         await dbRun("COMMIT");
     } catch (err) {
         try {
@@ -595,7 +614,7 @@ async function rejectTrade(tradeId, userId) {
 /**
  * Cancel a pending trade as the requester.
  * @param {number} tradeId
- * @param {number} userId - Must be the trade's from_user.
+ * @param {number} userId - Must be the trade's from_user_id.
  * @returns {Promise<void>}
  */
 async function cancelTrade(tradeId, userId) {
@@ -604,22 +623,22 @@ async function cancelTrade(tradeId, userId) {
 
     try {
         await dbRun("BEGIN IMMEDIATE TRANSACTION");
-        // REPLACE trades
-        const trade = await dbGet("SELECT * FROM trades WHERE id = ?", [tradeId]);
 
-        if (!trade || (trade.from_user !== userId && trade.to_user !== userId)) {
+        const trade = await dbGet("SELECT * FROM exchanges WHERE id = ?", [tradeId]);
+
+        if (!trade || (trade.from_user_id !== userId && trade.to_user_id !== userId)) {
             throw new NotFoundError("Trade not found.");
         }
-        if (trade.from_user !== userId) {
+        if (trade.from_user_id !== userId) {
             throw new ForbiddenError("Only the requester can cancel a trade.", { reason: "not_requester" });
         }
         if (trade.status !== "pending") {
             throw new ValidationError("This trade is no longer pending.", { reason: "invalid_status", status: trade.status });
         }
 
-        recipientId = trade.to_user;
-        // REPLACE trades
-        await dbRun("UPDATE trades SET status = 'canceled', updated_at = ? WHERE id = ?", [now, tradeId]);
+        recipientId = trade.to_user_id;
+
+        await dbRun("UPDATE exchanges SET status = 'canceled', updated_at = ? WHERE id = ?", [now, tradeId]);
         await dbRun("COMMIT");
     } catch (err) {
         try {
