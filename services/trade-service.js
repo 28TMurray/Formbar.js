@@ -206,7 +206,7 @@ function formatTradePayload(party) {
             payload.digipogs = quantity;
         } else {
             payload.items ??= [];
-            payload.items.push({itemId, quantity});
+            payload.items.push({itemId: Number(itemId), quantity});
         }
     }
 
@@ -222,7 +222,7 @@ function formatTrade(row) {
     const offered = {
         source: {
             type: row.from_type === "user" ? "inventory" : row.from_type,
-            ...(row.from_pool_id != null ? { poolId: row.from_id } : {}),
+            ...(row.from_id != null ? { poolId: row.from_id } : {}),
         },
         ...formatTradePayload(row.offer),
     };
@@ -237,8 +237,8 @@ function formatTrade(row) {
 
     return {
         id: row.id,
-        fromUserId: row.from_user,
-        toUserId: row.to_user,
+        fromUserId: row.from_user_id,
+        toUserId: row.to_user_id,
         offered,
         requested,
         status: row.status,
@@ -434,20 +434,17 @@ async function acceptTrade(tradeId, userId) {
 
         // Helper for filtering non-digipog
         function getPayloadItems(payload) {
-            return Object.entries(payload).reduce((items, [itemId, quantity]) => {
-                items ??= {};
+            let items = {};
+            for (const [itemId, quantity] of Object.entries(payload)) {
                 if (itemId !== "0") {
-                    console.log(itemId);
-                    items[itemId] = quantity
+                    items[itemId] = quantity;
                 }
-                return items;
-            });
+            }
+            return items;
         }
         
         const offerItems = getPayloadItems(offer);
         const requestItems = getPayloadItems(request);
-        console.log(offerItems);
-        console.log(requestItems);
         const offerDigipogs = offer["0"] ?? 0;
         const requestDigipogs = request["0"] ?? 0;
         
@@ -487,9 +484,7 @@ async function acceptTrade(tradeId, userId) {
         // Re-check requested (to) side.
         if (trade.to_type === "user") {
             for (const [ itemId, quantity ] of Object.entries(requestItems)) {
-                console.log(toUserId, itemId);
                 const total = await getInventoryTotal(toUserId, itemId);
-                console.log(total);
                 if (total < quantity) {
                     return await failTrade("Recipient no longer has sufficient items.");
                 }
