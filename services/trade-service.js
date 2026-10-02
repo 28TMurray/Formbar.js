@@ -326,7 +326,7 @@ async function createTrade({ fromUserId, toUserId, offered, requested }) {
             JSON.stringify(exchangeOffer),
             toUserId,
             requestedSide.poolId,
-            offeredSide.sourceType === "inventory" ? "user" : offeredSide.sourceType,
+            requestedSide.sourceType === "inventory" ? "user" : requestedSide.sourceType,
             JSON.stringify(exchangeRequest),
             now,
             now,
@@ -435,7 +435,9 @@ async function acceptTrade(tradeId, userId) {
         // Helper for filtering non-digipog
         function getPayloadItems(payload) {
             return Object.entries(payload).reduce((items, [itemId, quantity]) => {
+                items ??= {};
                 if (itemId !== "0") {
+                    console.log(itemId);
                     items[itemId] = quantity
                 }
                 return items;
@@ -444,6 +446,8 @@ async function acceptTrade(tradeId, userId) {
         
         const offerItems = getPayloadItems(offer);
         const requestItems = getPayloadItems(request);
+        console.log(offerItems);
+        console.log(requestItems);
         const offerDigipogs = offer["0"] ?? 0;
         const requestDigipogs = request["0"] ?? 0;
         
@@ -483,9 +487,11 @@ async function acceptTrade(tradeId, userId) {
         // Re-check requested (to) side.
         if (trade.to_type === "user") {
             for (const [ itemId, quantity ] of Object.entries(requestItems)) {
+                console.log(toUserId, itemId);
                 const total = await getInventoryTotal(toUserId, itemId);
+                console.log(total);
                 if (total < quantity) {
-                    return await failTrade("Recipient no longer has sufficient user.");
+                    return await failTrade("Recipient no longer has sufficient items.");
                 }
             }
         } else {
