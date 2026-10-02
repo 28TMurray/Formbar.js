@@ -4,21 +4,84 @@ const { requireBodyParam } = require("@modules/error-wrapper");
 const ValidationError = require("@errors/validation-error");
 
 module.exports = (router) => {
+    /**
+    * @swagger
+    * /exchanges:
+    *   post:
+    *     summary: Create a new exchange
+    *     description: Creates a new exchange transaction between two parties
+    *     tags:
+    *       - Exchanges
+    *     security:
+    *       - bearerAuth: []
+    *     requestBody:
+    *       required: true
+    *       content:
+    *         application/json:
+    *           schema:
+    *             type: object
+    *             required:
+    *               - to
+    *               - from
+    *             properties:
+    *               to:
+    *                 type: object
+    *                 description: Recipient details
+    *               from:
+    *                 type: object
+    *                 description: Sender details
+    *               reason:
+    *                 type: string
+    *                 description: Reason for the exchange
+    *     responses:
+    *       200:
+    *         description: Exchange completed successfully
+    *         content:
+    *           application/json:
+    *             schema:
+    *               type: object
+    *               properties:
+    *                 success:
+    *                   type: boolean
+    *                 data:
+    *                   type: object
+    *                   properties:
+    *                     exchangeId:
+    *                       type: string
+    *       201:
+    *         description: Exchange pending approval
+    *         content:
+    *           application/json:
+    *             schema:
+    *               type: object
+    *               properties:
+    *                 success:
+    *                   type: boolean
+    *                 data:
+    *                   type: object
+    *                   properties:
+    *                     exchangeId:
+    *                       type: string
+    *       400:
+    *         description: Missing required fields or invalid amounts
+    *       401:
+    *         description: Invalid PIN
+    *       403:
+    *         description: Not pool's top holder
+    *       500:
+    *         description: Failed transfer
+    */
     router.post("/exchanges", isAuthenticated, isVerified, async (req, res) => {
-        const { to, from, reason } = req.body;
+        const { to, from } = req.body;
 
         requireBodyParam(to, "to");
         requireBodyParam(from, "from");
-        requireBodyParam(reason, "reason");
 
         if (typeof to !== "object") {
             throw new ValidationError("to must be an object");
         }
         if (typeof from !== "object") {
             throw new ValidationError("from must be an object");
-        }
-        if (typeof reason !== "string") {
-            throw new ValidationError("reason must be a string");
         }
 
         req.infoEvent("exchange.create.attempt", "Creating exchange", req.body);
