@@ -1,6 +1,6 @@
 const { dbGet, dbGetAll, dbRun } = require("@modules/database");
 const { buildPagination } = require("@modules/pagination");
-const { creditDigipogTransferRecipient, isPoolFoundedByUser, isPoolUserTopHolder } = require("@services/digipog-service");
+const { creditDigipogTransferRecipient, isPoolUserTopHolder } = require("@services/digipog-service");
 const { addItemToInventory } = require("@services/inventory-service");
 const { createNotification } = require("@services/notification-service");
 const NotFoundError = require("@errors/not-found-error");

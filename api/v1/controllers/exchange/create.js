@@ -63,11 +63,13 @@ module.exports = (router) => {
     *                     exchangeId:
     *                       type: string
     *       400:
-    *         description: Missing required fields or invalid amounts
+    *         description: Request is badly formed or is missing PIN.
     *       401:
     *         description: Invalid PIN
     *       403:
     *         description: Not pool's top holder
+    *       404:
+    *         description: Invalid IDs
     *       500:
     *         description: Failed transfer
     */
@@ -86,7 +88,7 @@ module.exports = (router) => {
 
         req.infoEvent("exchange.create.attempt", "Creating exchange", req.body);
 
-        const { exchangeId } = await createExchange(req.body);
+        const response = await createExchange(req.body);
 
         res.status(200).json({ success: true, data: { exchangeId } });
     })

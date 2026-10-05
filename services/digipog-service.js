@@ -4,6 +4,7 @@ const { getClassIDFromCode } = require("@services/classroom-service");
 const { getGlobalPermissionLevelForUser } = require("@modules/scope-resolver");
 const { hashBcrypt, compareBcrypt } = require("@modules/crypto");
 const { digipogRateLimit } = require("@modules/config");
+const NotFoundError = require("@errors/not-found-error");
 const AppError = require("@errors/app-error");
 
 // Rate limiting
