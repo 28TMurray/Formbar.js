@@ -1092,15 +1092,12 @@ async function awardDigipogs(awardData, user) {
         }
 
         try {
-            await dbRun("INSERT INTO exchanges (from_user_id, from_type, offer, to_user_id, to_type, request, reason, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [
+            await dbRun("INSERT INTO exchanges (from_user_id, from_type, offer, to_user_id, to_type, request, reason, status, created_at, updated_at) VALUES (?, 'user', ?, ?, ?, '{}', ?, 'completed', ?, ?)", [
                 from,
-                'user',
                 JSON.stringify({0: amount}),
                 to.id,
                 to.type,
-                '{}',
                 reason,
-                'completed',
                 new Date().toISOString(),
                 new Date().toISOString()
             ]);
