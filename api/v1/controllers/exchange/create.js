@@ -67,24 +67,19 @@ module.exports = (router) => {
     *       401:
     *         description: Invalid PIN
     *       403:
-    *         description: Not pool's top holder
+    *         description: Insufficient resources
     *       404:
     *         description: Invalid IDs
     *       500:
     *         description: Failed transfer
     */
-    router.post("/exchanges", isAuthenticated, isVerified, async (req, res) => {
+    router.post("/exchanges", isAuthenticated, async (req, res) => {
         const { to, from } = req.body;
 
         requireBodyParam(to, "to");
         requireBodyParam(from, "from");
 
-        if (typeof to !== "object") {
-            throw new ValidationError("to must be an object");
-        }
-        if (typeof from !== "object") {
-            throw new ValidationError("from must be an object");
-        }
+        from.userId = req.user.id;
 
         req.infoEvent("exchange.create.attempt", "Creating exchange", req.body);
 

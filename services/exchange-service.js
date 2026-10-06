@@ -2,6 +2,7 @@ const { getPoolById, verifyPoolPin } = require("@services/digipog-service");
 const { getUserDataFromDb, verifyPin } = require("@services/user-service");
 const { getItemById } = require("@services/inventory-service");
 const ValidationError = require("@errors/validation-error");
+const ForbiddenError = require("@errors/forbidden-error");
 const NotFoundError = require("@errors/not-found-error");
 
 /**
@@ -19,6 +20,11 @@ function getPayloadItems(payload) {
     return items;
 }
 
+async function getInventoryTotal(userId, itemId) {
+    const row = await dbGet("SELECT COALESCE(SUM(quantity), 0) AS total FROM inventory WHERE user_id = ? AND item_id = ?", [userId, itemId]);
+    return row ? row.total : 0;
+}
+
 /**
  * Assert a user holds at least the required quantity of every item. Throws a
  * ValidationError if any item is insufficient.
@@ -27,10 +33,10 @@ function getPayloadItems(payload) {
  * @returns {Promise<void>}
  */
 async function checkInventoryAvailability(userId, items) {
-    for (const { itemId, quantity } of items) {
+    for (const [ itemId, quantity ] of Object.entries(items)) {
         const total = await getInventoryTotal(userId, itemId);
         if (total < quantity) {
-            throw new ValidationError(`Insufficient inventory for item ${itemId}: have ${total}, need ${quantity}.`, {
+            throw new ForbiddenError(`Insufficient inventory for item ${itemId}: need ${quantity}, have ${total}.`, {
                 reason: "insufficient_inventory",
                 itemId,
             });
@@ -58,11 +64,14 @@ async function checkPoolBalanceAvailability(poolId, amount) {
 
 function validateExchangePartyFields(exchangeParty, payload, name, payloadName) {
     // Check if well-formed
+    if (typeof exchangeParty !== "object") {
+        throw new ValidationError(`"${name}" must be an object.`);
+    }
     if (exchangeParty.id == null || exchangeParty.id <= 0) {
-        throw new ValidationError(`"id" field of "${name}" must be a valid user ID`);
+        throw new ValidationError(`"id" field of "${name}" must be a valid user ID.`);
     }
     if (exchangeParty.type == null || !(["user", "pool"].includes(exchangeParty.type))) {
-        throw new ValidationError(`"type" field of "${name}" must be either "user" or "pool"`);
+        throw new ValidationError(`"type" field of "${name}" must be either "user" or "pool".`);
     }
 
     let exchangeAccount = exchangeParty.type === "user" ? getUserDataFromDb(exchangeParty.id) : getPoolById(exchangeParty.id);
@@ -71,45 +80,66 @@ function validateExchangePartyFields(exchangeParty, payload, name, payloadName) 
     }
     
     if (typeof payload !== "object") {
-        throw new ValidationError(`"${payloadName}" field of "${name}" must be an object with IDs as keys and quantities as values`);
+        throw new ValidationError(`"${payloadName}" field of "${name}" must be an object with IDs as keys and quantities as values.`);
     } else {
         for (const [itemId, quantity] of Object.entries(payload)) {
             // Check if payload is well-formed
             const itemIdNum = Number(itemId);
 
-            if (!Number.isInteger(itemIdNum) || itemIdNum < 0)
-                throw new ValidationError(`"${payloadName}" must have valid IDs as keys (0 = digipogs, 1+ = item IDs)`);
-
-            if (!Number.isInteger(quantity) || quantity <= 0)
-                throw new ValidationError(`"${payloadName}" must have positive integer values as quantities`);
-
-            if (exchangeParty.type === "user") {
-                if (itemIdNum === 0 ) {
-
-                }
-            } else {
-                if (itemIdNum !== 0) throw new ValidationError(`"${payloadName}" cannot contain items because it is of type "pool"`);
-                checkPoolBalanceAvailability(exchangeParty.id)
+            if (!Number.isInteger(itemIdNum) || itemIdNum < 0) {
+                throw new ValidationError(`"${payloadName}" must have valid IDs as keys (0 = digipogs, 1+ = item IDs).`);
             }
 
-            // Check if item exists
-            try {
-                getItemById(itemId);
-            } catch (err) {
-                throw NotFoundError(`Item ID ${itemId} is not associated with a valid item`);
+            if (!Number.isInteger(quantity) || quantity <= 0) {
+                throw new ValidationError(`"${payloadName}" must have positive integer values as quantities.`);
+            }
+
+            // Non-digipogs need additional checks
+            if (itemIdNum !== 0) {
+                if (exchangeParty.type === "pool") {
+                    throw new ValidationError(`"${payloadName}" cannot contain items because it is of type "pool".`);
+                }
+
+                try {
+                    getItemById(itemId);
+                } catch (err) {
+                    throw NotFoundError(`Item ID ${itemId} is not associated with a valid item.`);
+                }
             }
         }
     }
+
+    return exchangeAccount;
 }
 
 function validateRequesterPartyFields(fromParty, fromPayload, name, payloadName) {
-    validateExchangePartyFields(fromParty, fromPayload, name, payloadName);
-    if (fromParty.pin == null) {
-        throw new ValidationError(`"pin" field of "${name}" is required`);
+    const fromAccount = validateExchangePartyFields(fromParty, fromPayload, name, payloadName);
+
+    if (Object.keys(fromPayload) === 0) {
+        throw new ValidationError(`"${payloadName}" can not be empty.`);
+    }
+    
+    // Requester makes trade with resources they have
+    // Recipient only needs them when accepting
+    if (exchangeParty.type === "user") {
+        if (typeof fromPayload["0"] === "number" && fromAccount.digipogs < fromPayload["0"]) {
+            throw new ForbiddenError(`The requester has insufficient digipog balance: need ${fromPayload["0"]}, have ${fromAccount.digipogs}.`);
+        }
+        checkInventoryAvailability(fromAccount.id, getPayloadItems(fromPayload));
+    } else {
+        if (fromAccount.amount < fromPayload["0"]) {
+            throw new ForbiddenError(`The requester pool has insufficient digipog balance: need ${fromPayload["0"]}, have ${fromAccount.digipogs}.`);
+        }
     }
 
-    if (fromParty.type === "user") return verifyPin(fromParty.id, fromParty.pin);
-    if (fromParty.type === "pool") return verifyPoolPin(fromParty.id, fromParty.pin);
+    if (fromParty.pin == null) {
+        throw new ValidationError(`"pin" field of "${name}" is required.`);
+    }
+    
+    if (fromParty.type === "user") return verifyPin(fromAccount.id, fromParty.pin);
+    if (fromParty.type === "pool") return verifyPoolPin(fromAccount.id, fromParty.pin);
+
+    return fromAccount;
 }
 
 async function createExchange(exchange) {
@@ -117,24 +147,26 @@ async function createExchange(exchange) {
     validateExchangePartyFields(to, to.request, "to", "request");
     validateRequesterPartyFields(from, from.offer, "from", "offer");
 
-    if (to.id === from.id) {
+    if (to.id === from.id && to.type === from.type) {
         throw new ValidationError("You cannot exchange with yourself.");
     }
-
+    
     const requestDigipogs = to.request["0"];
     const offerDigipogs = from.offer["0"];
     const requestItems = getPayloadItems(to.request);
     const offerItems = getPayloadItems(from.offer);
 
-    // Treat as a trade if there are items/digipogs on both sides
-    // Make sure both aren't empty
-    // Otherwise treat it as a transaction
-    if (Object.keys(to.request) > 0 && Object.keys(from.offer) > 0) {
-        if (to.request)
-    } else if (Object.keys(to.request) === 0 && Object.keys(from.offer) === 0) {
-        throw new ValidationError("Need a non-empty offer or request")
-    } else {
+    if ((Object.keys(requestItems) > 0 && from.type === "pool") ||j
+        (Object.keys(offerItems) > 0 && to.type === "pool")) {
+        throw new ValidationError("Pools can not receive items.");
+    }
 
+    // Treat as a trade if there is a request
+    // Otherwise treat it as a transaction
+    if (Object.keys(to.request) > 0) {
+        
+    } else {
+        
     }
 }
 
