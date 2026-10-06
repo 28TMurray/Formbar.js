@@ -83,7 +83,7 @@ module.exports = (router) => {
 
         req.infoEvent("exchange.create.attempt", "Creating exchange", req.body);
 
-        const response = await createExchange(req.body);
+        const { status, exchangeId } = await createExchange(req.body);
 
         res.status(200).json({ success: true, data: { exchangeId } });
     })
