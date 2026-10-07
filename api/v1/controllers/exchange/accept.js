@@ -70,7 +70,7 @@ module.exports = (router) => {
 
         req.infoEvent("exchanges.accept", "Accepting exchange", { exchangeId, userId: req.user.id });
 
-        const result = await acceptTrade(exchangeId, req.user.id);
+        const result = await acceptExchange(exchangeId, pin);
         res.status(200).json({ success: true, data: { accepted: result.success, reason: result.reason || null } });
     });
 };
