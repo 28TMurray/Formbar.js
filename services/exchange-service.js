@@ -1,7 +1,7 @@
-const { dbGet, dbRun } = require("@modules/database");
+const { dbGet, dbRun, dbGetAll } = require("@modules/database");
 const { creditDigipogTransferRecipient, getPoolById, verifyPoolPin, getTopHoldingPoolsForUser } = require("@services/digipog-service");
 const { getUserDataFromDb, verifyPin } = require("@services/user-service");
-const { addItemToInventory, removeItemFromInventory, getItemById } = require("@services/inventory-service");
+const { addItemToInventory, getItemById } = require("@services/inventory-service");
 const { createNotification } = require("@services/notification-service");
 const ValidationError = require("@errors/validation-error");
 const ForbiddenError = require("@errors/forbidden-error");
@@ -421,7 +421,12 @@ async function getExchangeById(exchangeId, userId) {
     return formatExchangeFromDbToApi(exchange);
 }
 
-async function getExchangesForUser(userId, { limit = 20, offset = 0, filters = [] }) {
+async function getExchangesForUser(userId, { limit = 20, offset = 0, filters = ["inbound", "outbound"] }) {
+    // Always include inbound and outbound by default if neither are specified
+    if (!filters.includes("inbound") && !filters.includes("outbound")) {
+        filters.push("inbound", "outbound");
+    }
+
     // Filters that can be achieved with a simple sql condition
     const sqlFilters = {
         trade: "request != '{}'",
@@ -429,18 +434,62 @@ async function getExchangesForUser(userId, { limit = 20, offset = 0, filters = [
         inactive: "status IN ('rejected', 'canceled', 'failed')"
     }
     // Filters that are easier to implement in JS
-    // All are functions that return a boolean
+    // All are functions that return a Promise<boolean>
     const jsFilters = {
         inbound: async (exchange) => {
-            return (
-                exchange.to_user_id === userId || await getTopHoldingPoolsForUser(userId).includes(exchange.to_id)
-            );
+            return exchange.to_user_id === userId && await getTopHoldingPoolsForUser(userId).includes(exchange.to_id);
         },
         outbound: async (exchange) => {
-            return (
-                exchange.from_user_id === userId || await getTopHoldingPoolsForUser(userId).includes(exchange.from_id)
-            );
+            return exchange.from_user_id === userId || await getTopHoldingPoolsForUser(userId).includes(exchange.from_id);
         },
+    }
+
+    let activeSqlFilters = [];
+    let statusFilters = [];
+    let activeJsFilters = [];
+
+    for (const filter of filters) {
+        const sqlFilter = sqlFilters[filter];
+        const jsFilter = jsFilters[filter];
+
+        // Treat filter as filtering for a specific status if no sqlFilter defined
+        // Use as statusFilters as binding parameters to avoid injection
+        if (sqlFilter == null) {
+            activeSqlFilters.push(`status = ?`);
+            statusFilters.push(filter);
+        } else {
+            activeSqlFilters.push(sqlFilter);
+        }
+
+        if (jsFilter != null) activeJsFilters.push(jsFilter);
+    }
+
+    let whereClause = activeSqlFilters.join(" AND ");
+    if (whereClause !== "") {
+        whereClause = "WHERE " + whereClause;
+    }
+
+    // Limit and offset can only be applied after jsFilters
+    const exchanges = await dbGetAll("SELECT * FROM exchanges " + whereClause, statusFilters);
+    let filteredExchanges = []
+
+    for (const exchange of exchanges) {
+        const filterResults = await Promise.allSettled(activeJsFilters.map((filter) => filter.call(this, exchange)));
+        if (!filterResults.includes(false)) {
+            filteredExchanges.push(exchange);
+        }
+    }
+
+    const finalExchanges = filteredExchanges.slice(offset, offset + limit);
+    return {
+        success: true,
+        data: {
+            exchanges: finalExchanges,
+            total: filteredExchanges.length,
+            limit,
+            offset,
+            hasMore: filteredExchanges.length > limit
+        }
     }
 }
 
