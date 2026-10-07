@@ -1,5 +1,5 @@
 const { dbGet, dbRun } = require("@modules/database");
-const { creditDigipogTransferRecipient, getPoolById, verifyPoolPin } = require("@services/digipog-service");
+const { creditDigipogTransferRecipient, getPoolById, verifyPoolPin, getTopHoldingPoolsForUser } = require("@services/digipog-service");
 const { getUserDataFromDb, verifyPin } = require("@services/user-service");
 const { addItemToInventory, removeItemFromInventory, getItemById } = require("@services/inventory-service");
 const { createNotification } = require("@services/notification-service");
@@ -319,7 +319,7 @@ async function acceptExchange(exchangeId, pin) {
     const requestDigipogs = request["0"] ?? 0;
 
     const now = new Date().toISOString()
-    
+
     // Fail trade if insufficient items or digipogs
     async function checkResources(type, id, digipogs, items, name) {
         if (type === "user") {
@@ -341,30 +341,31 @@ async function acceptExchange(exchangeId, pin) {
             }
         }
     }
-    await dbRun("BEGIN IMMEDIATE TRANSACTION");
-        
+
     try {
-        await checkResources(exchange.from_type, offerId, offerDigipogs, offerItems, "Creator");
-        await checkResources(exchange.to_type, requestId, requestDigipogs, requestItems, "Recipient");
+        await dbRun("BEGIN IMMEDIATE TRANSACTION");
+        {
+            await checkResources(exchange.from_type, offerId, offerDigipogs, offerItems, "Creator");
+            await checkResources(exchange.to_type, requestId, requestDigipogs, requestItems, "Recipient");
 
-        // Transfer digipogs
-        if (offerDigipogs > 0) await exchangeDigipogs(offerDigipogs, exchange.from_type, offerId, exchange.to_type, requestId);
-        if (requestDigipogs > 0) await exchangeDigipogs(requestDigipogs, exchange.to_type, requestId, exchange.from_type, offerId);
+            // Transfer digipogs
+            if (offerDigipogs > 0) await exchangeDigipogs(offerDigipogs, exchange.from_type, offerId, exchange.to_type, requestId);
+            if (requestDigipogs > 0) await exchangeDigipogs(requestDigipogs, exchange.to_type, requestId, exchange.from_type, offerId);
 
-        // Transfer resources
-        for (const [itemId, quantity] of offerItems) {
-            await strictRemoveFromInventory(offerId, itemId, quantity);
-            await addItemToInventory(requestId, itemId, quantity);
+            // Transfer resources
+            for (const [itemId, quantity] of offerItems) {
+                await strictRemoveFromInventory(offerId, itemId, quantity);
+                await addItemToInventory(requestId, itemId, quantity);
+            }
+
+            for (const [itemId, quantity] of requestItems) {
+                await strictRemoveFromInventory(requestId, itemId, quantity);
+                await addItemToInventory(offerId, itemId, quantity);
+            }
+
+            await dbRun("UPDATE exchanges SET status = 'completed', updated_at = ? WHERE id = ?", [now, exchangeId]);
         }
-
-        for (const [itemId, quantity] of requestItems) {
-            await strictRemoveFromInventory(requestId, itemId, quantity);
-            await addItemToInventory(offerId, itemId, quantity);
-        }
-
-        dbRun("UPDATE exchanges SET status = 'completed', updated_at = ? WHERE id = ?", [now, exchangeId]);
-        
-        dbRun("COMMIT");
+        await dbRun("COMMIT");
     } catch (err) {
         /**
          * Mark the exchange as failed, commit, and notify both participants. Throws the error
@@ -378,6 +379,122 @@ async function acceptExchange(exchangeId, pin) {
         ]);
         throw err;
     }
+}
+
+function formatExchangeFromDbToApi(rawExchange) {
+    const formattedExchange = {
+        id: rawExchange.id,
+        to: {
+            id: rawExchange.to_id ?? rawExchange.to_user_id,
+            type: rawExchange.to_type,
+            request: JSON.parse(rawExchange.request),
+        },
+        from: {
+            id: rawExchange.from_id ?? rawExchange.from_user_id,
+            type: rawExchange.from_type,
+            offer: JSON.parse(rawExchange.offer),
+        },
+        reason: rawExchange.reason,
+        status: rawExchange.status,
+    };
+
+    if (rawExchange.failure_reason != null) {
+        formattedExchange.failureReason = rawExchange.failure_reason;
+    }
+
+    return formattedExchange;
+}
+
+async function getExchangeById(exchangeId, userId) {
+    const exchange = await dbGet("SELECT * FROM exchanges WHERE id = ?", [exchangeId]);
+    const topHoldingPools = await getTopHoldingPoolsForUser(userId);
+    if (!exchange ||
+        (
+            exchange.from_user_id !== userId &&
+            exchange.to_user_id !== userId &&
+            !topHoldingPools.includes(exchange.from_user_id) &&
+            !topHoldingPools.includes(exchange.to_user_id)
+        )
+    ) {
+        return null;
+    }
+    return formatExchangeFromDbToApi(exchange);
+}
+
+async function getExchangesForUser(userId, { limit = 20, offset = 0, filters = [] }) {
+    // Filters that can be achieved with a simple sql condition
+    const sqlFilters = {
+        trade: "request != '{}'",
+        transaction: "request = '{}'",
+        inactive: "status IN ('rejected', 'canceled', 'failed')"
+    }
+    // Filters that are easier to implement in JS
+    // All are functions that return a boolean
+    const jsFilters = {
+        inbound: async (exchange) => {
+            return (
+                exchange.to_user_id === userId || await getTopHoldingPoolsForUser(userId).includes(exchange.to_id)
+            );
+        },
+        outbound: async (exchange) => {
+            return (
+                exchange.from_user_id === userId || await getTopHoldingPoolsForUser(userId).includes(exchange.from_id)
+            );
+        },
+    }
+}
+
+async function cancelExchange(exchangeId, pin) {
+    const exchange = await dbGet("SELECT from_user_id, from_id, from_type, status FROM exchanges WHERE id = ?", [exchangeId]);
+
+    if (!exchange) {
+        throw new NotFoundError(`ID ${exchangeId} is not associated with a valid exchange.`)
+    }
+
+    const { from_user_id, from_id, from_type, status } = exchange;
+
+    if (status !== "pending") {
+        throw new ValidationError("This exchange is no longer pending.", { reason: "invalid_status", status: status });
+    }
+
+
+    if (from_type === "user") {
+        verifyPin(from_user_id, pin);
+    } else {
+        verifyPoolPin(from_id, pin);
+    }
+
+    await dbRun("BEGIN IMMEDIATE TRANSACTION");
+    {
+        await dbRun("UPDATE exchanges SET status = 'cancelled', failure_reason = 'Creator initiated cancel'");
+    }
+    await dbRun("COMMIT");
+}
+
+async function rejectExchange(exchangeId, pin) {
+    const exchange = await dbGet("SELECT to_user_id, to_id, to_type, status FROM exchanges WHERE id = ?", [exchangeId]);
+
+    if (!exchange) {
+        throw new NotFoundError(`ID ${exchangeId} is not associated with a valid exchange.`)
+    }
+
+    const { to_user_id, to_id, to_type, status } = exchange;
+
+    if (status !== "pending") {
+        throw new ValidationError("This exchange is no longer pending.", { reason: "invalid_status", status: status });
+    }
+
+    if (to_type === "user") {
+        verifyPin(to_user_id, pin);
+    } else {
+        verifyPoolPin(to_id, pin);
+    }
+
+    await dbRun("BEGIN IMMEDIATE TRANSACTION");
+    {
+        await dbRun("UPDATE exchanges SET status = 'rejected', failure_reason = 'Recipient rejected the trade'");
+    }
+    await dbRun("COMMIT");
 }
 
 module.exports = {

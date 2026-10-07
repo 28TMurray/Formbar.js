@@ -292,6 +292,25 @@ function poolTopHolderCheck(req) {
     return isPoolUserTopHolder(Number(req.params.id), req.user.id);
 }
 
+
+/**
+ * Get the IDs of pools where the user is a top holder.
+ * @param {number} userId - The user to check.
+ * @returns {Promise<Array<number>>} Pool IDs where the user is a top holder.
+ */
+async function getTopHoldingPoolsForUser(userId) {
+    const pools = await getPoolsForUser(userId);
+
+    let topHoldingPools = [];
+
+    for (const {pool_id} of pools) {
+        if (await isPoolUserTopHolder(userId))
+            topHoldingPools.push(pool_id);
+    }
+    
+    return topHoldingPools;
+}
+
 /**
  * Update a pool PIN after verifying the old PIN.
  * @param {number} poolId - poolId.
@@ -1344,6 +1363,7 @@ module.exports = {
     getPoolsForUserPaginated,
     getUsersForPool,
     getPoolById,
+    getTopHoldingPoolsForUser,
     isUserInPool,
     isPoolFoundedByUser,
     poolFounderCheck,
