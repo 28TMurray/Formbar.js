@@ -1,7 +1,8 @@
 const { dbGet, dbRun } = require("@modules/database");
 const { creditDigipogTransferRecipient, getPoolById, verifyPoolPin } = require("@services/digipog-service");
 const { getUserDataFromDb, verifyPin } = require("@services/user-service");
-const { getItemById } = require("@services/inventory-service");
+const { addItemToInventory, removeItemFromInventory, getItemById } = require("@services/inventory-service");
+const { createNotification } = require("@services/notification-service");
 const ValidationError = require("@errors/validation-error");
 const ForbiddenError = require("@errors/forbidden-error");
 const NotFoundError = require("@errors/not-found-error");
@@ -42,6 +43,64 @@ async function checkInventoryAvailability(userId, items) {
                 reason: "insufficient_inventory",
                 itemId,
             });
+        }
+    }
+}
+
+/**
+ * Simply transfers digipogs from one user to another.
+ * transferDigipogs from digipog service works with API objects
+ * @param {number} amount
+ * @param {string} fromType
+ * @param {number} fromId
+ * @param {string} toType
+ * @param {number} toId
+ */
+async function exchangeDigipogs(amount, fromType, fromId, toType, toId) {
+    if (fromType === "user") {
+        await dbRun("UPDATE users SET digipogs = digipogs - ? WHERE id = ? AND digipogs >= ?", [
+            amount,
+            fromId,
+            amount,
+        ]);
+    } else {
+        await dbRun("UPDATE digipog_pools SET amount = amount - ? WHERE id = ? AND amount >= ?", [
+            amount,
+            fromId,
+            amount,
+        ]);
+    }
+
+    creditDigipogTransferRecipient(amount, toType, toId);
+}
+
+/**
+ * Remove an exact quantity of an item from a user's inventory stacks. Throws
+ * if the user does not hold enough. This is the strict variant used during
+ * trade acceptance; it does NOT alter the permissive removeItemFromInventory
+ * used elsewhere.
+ * @param {number} userId
+ * @param {number} itemId
+ * @param {number} quantity
+ * @returns {Promise<void>}
+ */
+async function strictRemoveFromInventory(userId, itemId, quantity) {
+    const rows = await dbGetAll("SELECT id, quantity FROM inventory WHERE user_id = ? AND item_id = ? ORDER BY id DESC", [userId, itemId]);
+    const total = rows.reduce((sum, r) => sum + r.quantity, 0);
+
+    if (total < quantity) {
+        throw new ForbiddenError(`Insufficient inventory: need ${quantity} of item ${itemId}, have ${total}.`);
+    }
+
+    let remaining = quantity;
+    for (const row of rows) {
+        if (remaining <= 0) break;
+        if (row.quantity <= remaining) {
+            await dbRun("DELETE FROM inventory WHERE id = ?", [row.id]);
+            remaining -= row.quantity;
+        } else {
+            await dbRun("UPDATE inventory SET quantity = quantity - ? WHERE id = ?", [remaining, row.id]);
+            remaining = 0;
         }
     }
 }
@@ -137,6 +196,7 @@ async function createExchange(exchange) {
 
     to.userId = to.type === "user" ? to.id : null;
     to.poolId = to.type === "pool" ? to.id : null;
+    from.userId = from.type === "user" ? from.id : from.userId;
     from.poolId = from.type === "pool" ? from.id : null;
 
     const offerDigipogs = from.offer["0"];
@@ -178,21 +238,30 @@ async function createExchange(exchange) {
         try {
             await dbRun("BEGIN IMMEDIATE TRANSACTION");
             {
+                exchangeDigipogs(offerDigipogs, from.type, from.id, to.type, to.id);
+                // Transfer digipogs
                 if (from.type === "user") {
                     await dbRun("UPDATE users SET digipogs = digipogs - ? WHERE id = ? AND digipogs >= ?", [
                         offerDigipogs,
-                        from.id,
+                        from.userId,
                         offerDigipogs,
                     ]);
                 } else {
                     await dbRun("UPDATE digipog_pools SET amount = amount - ? WHERE id = ? AND amount >= ?", [
                         offerDigipogs,
-                        from.id,
+                        from.poolId,
                         offerDigipogs,
                     ]);
                 }
                 await creditDigipogTransferRecipient(offerDigipogs, to.type, to.id);
 
+                // Transfer items
+                for (const [itemId, quantity] of offerItems) {
+                    await strictRemoveFromInventory(from.userId, itemId, quantity);
+                    await addItemToInventory(to.userId, itemId, quantity);
+                }
+
+                // Log exchange
                 exchangeId = await dbRun(
                     `INSERT INTO exchanges (from_user_id, from_id, from_type, offer, to_user_id, to_id, to_type,
                                     request, reason, status, created_at, updated_at) 
@@ -213,7 +282,7 @@ async function createExchange(exchange) {
                 );
             }
             await dbRun("COMMIT");
-            status = 201;
+            status = 200;
         } catch (err) {
             console.error(err)
             await dbRun("ROLLBACK");
@@ -227,10 +296,91 @@ async function createExchange(exchange) {
     return { status, exchangeId };
 }
 
-function acceptExchange(exchangeId, userId) {
+async function acceptExchange(exchangeId, pin) {
+    const exchange = await dbGet("SELECT * FROM exchanges WHERE id = ?", [exchangeId]);
 
+    // Validation/Authorization
+    if (!exchange || exchange.status !== "pending") {
+        throw new ValidationError("This exchange is no longer pending.", { reason: "invalid_status", status: exchange.status });
+    }
+
+    if (exchange.to_type === "user") await verifyPin(exchange.to_user_id, pin);
+    if (exchange.to_type === "pool") await verifyPoolPin(exchange.to_.id, pin);
+
+    // Deconstructing offer and request fields
+    const offer = JSON.parse(exchange.offer);
+    const request = JSON.parse(exchange.request);
+
+    const offerId = exchange.from_id ?? exchange.from_user_id;
+    const requestId = exchange.to_id ?? exchange.to_user_id;
+    const offerItems = getPayloadItems(offer);
+    const requestItems = getPayloadItems(request);
+    const offerDigipogs = offer["0"] ?? 0;
+    const requestDigipogs = request["0"] ?? 0;
+
+    const now = new Date().toISOString()
+    
+    // Fail trade if insufficient items or digipogs
+    async function checkResources(type, id, digipogs, items, name) {
+        if (type === "user") {
+            const user = await getUserDataFromDb(id);
+            if (!user) {
+                throw new NotFoundError(`${name} is no longer associated with a valid user.`, { reason: "invalid_user", id: id });
+            }
+            if (user.digipogs < digipogs) {
+                throw new ForbiddenError(`${name} has insufficient funds: need ${digipogs}, have ${user.digipogs}.`, { reason: "insufficient_funds", id: id });
+            }
+            await checkInventoryAvailability(user.id, items);
+        } else {
+            const pool = await getPoolById(id);
+            if (!pool) {
+                throw new NotFoundError(`${name} is no longer associated with a valid pool.`, { reason: "invalid_pool", id: id });
+            }
+            if (pool.amount < digipogs) {
+                throw new ForbiddenError(`${name} has insufficient funds in pool: need ${digipogs}, have ${pool.amount}.`, { reason: "insufficient_pool_funds", id: id });
+            }
+        }
+    }
+    await dbRun("BEGIN IMMEDIATE TRANSACTION");
+        
+    try {
+        await checkResources(exchange.from_type, offerId, offerDigipogs, offerItems, "Creator");
+        await checkResources(exchange.to_type, requestId, requestDigipogs, requestItems, "Recipient");
+
+        // Transfer digipogs
+        if (offerDigipogs > 0) await exchangeDigipogs(offerDigipogs, exchange.from_type, offerId, exchange.to_type, requestId);
+        if (requestDigipogs > 0) await exchangeDigipogs(requestDigipogs, exchange.to_type, requestId, exchange.from_type, offerId);
+
+        // Transfer resources
+        for (const [itemId, quantity] of offerItems) {
+            await strictRemoveFromInventory(offerId, itemId, quantity);
+            await addItemToInventory(requestId, itemId, quantity);
+        }
+
+        for (const [itemId, quantity] of requestItems) {
+            await strictRemoveFromInventory(requestId, itemId, quantity);
+            await addItemToInventory(offerId, itemId, quantity);
+        }
+
+        dbRun("UPDATE exchanges SET status = 'completed', updated_at = ? WHERE id = ?", [now, exchangeId]);
+        
+        dbRun("COMMIT");
+    } catch (err) {
+        /**
+         * Mark the exchange as failed, commit, and notify both participants. Throws the error
+         * back up out of a catch.
+         */
+        await dbRun("ROLLBACK");
+        await dbRun("UPDATE exchanges SET status = 'failed', failure_reason = ?, updated_at = ? WHERE id = ?", [err.reason, now, exchangeId]);
+        await Promise.allSettled([
+            createNotification(fromUserId, "exchange_failed", { exchangeId, reason }),
+            createNotification(toUserId, "exchange_failed", { exchangeId, reason }),
+        ]);
+        throw err;
+    }
 }
 
 module.exports = {
-    createExchange
+    createExchange,
+    acceptExchange
 }
