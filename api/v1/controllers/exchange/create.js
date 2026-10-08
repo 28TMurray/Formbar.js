@@ -85,6 +85,6 @@ module.exports = (router) => {
 
         const { status, exchangeId } = await createExchange(req.body);
 
-        res.status(200).json({ success: true, data: { exchangeId } });
+        res.status(status).json({ success: true, data: { exchangeId } });
     })
 }
