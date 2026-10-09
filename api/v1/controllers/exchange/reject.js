@@ -1,22 +1,22 @@
 const { isAuthenticated, isVerified } = require("@middleware/authentication");
 const { requireParam } = require("@modules/error-wrapper");
-const { rejectTrade } = require("@services/trade-service");
+const { rejectExchange } = require("@services/exchange-service");
 const ValidationError = require("@errors/validation-error");
 
 /**
- * Register trades reject controller routes.
+ * Register exchanges reject controller routes.
  * @param {import("express").Router} router
  */
 module.exports = (router) => {
     /**
      * @swagger
-     * /api/v1/trades/{id}/reject:
+     * /api/v1/exchanges/{id}/reject:
      *   post:
-     *     summary: Reject a trade (recipient only)
+     *     summary: Reject a exchange (recipient only)
      *     description: >
-     *       Rejects a pending trade as the recipient. The requester receives a
-     *       `trade_rejected` notification.
-     *     tags: [Trades]
+     *       Rejects a pending exchange as the recipient. The requester receives a
+     *       `exchange_rejected` notification.
+     *     tags: [Exchanges]
      *     security:
      *       - bearerAuth: []
      *     parameters:
@@ -27,7 +27,7 @@ module.exports = (router) => {
      *           type: integer
      *     responses:
      *       200:
-     *         description: Trade rejected successfully
+     *         description: exchange rejected successfully
      *         content:
      *           application/json:
      *             schema:
@@ -42,19 +42,19 @@ module.exports = (router) => {
      *       403:
      *         description: User is not the recipient
      *       404:
-     *         description: Trade not found
+     *         description: exchange not found
      */
-    router.post("/trades/:id/reject", isAuthenticated, isVerified, async (req, res) => {
+    router.post("/exchanges/:id/reject", isAuthenticated, isVerified, async (req, res) => {
         requireParam(req.params.id, "id");
 
-        const tradeId = Number(req.params.id);
-        if (!Number.isInteger(tradeId) || tradeId <= 0) {
-            throw new ValidationError("Trade ID must be a positive integer.", { reason: "invalid_trade_id" });
+        const exchangeId = Number(req.params.id);
+        if (!Number.isInteger(exchangeId) || exchangeId <= 0) {
+            throw new ValidationError("exchange ID must be a positive integer.", { reason: "invalid_exchange_id" });
         }
 
-        req.infoEvent("trades.reject", "Rejecting trade", { tradeId, userId: req.user.id });
+        req.infoEvent("exchanges.reject", "Rejecting exchange", { exchangeId, userId: req.user.id });
 
-        await rejectTrade(tradeId, req.user.id);
+        await rejectExchange(exchangeId, req.user.id);
         res.status(200).json({ success: true, data: {} });
     });
 };

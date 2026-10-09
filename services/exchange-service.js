@@ -563,7 +563,7 @@ async function getExchangesForUser(userId, { limit = 20, offset = 0, filters = [
     for (const exchange of exchanges) {
         const filterResults = await Promise.allSettled(activeJsFilters.map((filter) => filter.call(this, exchange)));
         if (!filterResults.includes(false)) {
-            filteredExchanges.push(exchange);
+            filteredExchanges.push(formatExchangeFromDbToApi(exchange));
         }
     }
 

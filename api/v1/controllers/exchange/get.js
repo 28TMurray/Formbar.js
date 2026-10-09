@@ -1,6 +1,6 @@
 const { isAuthenticated, isVerified } = require("@middleware/authentication");
 const { requireParam } = require("@modules/error-wrapper");
-const { getTradeById } = require("@services/trade-service");
+const { getExchangeById } = require("@services/exchange-service");
 const NotFoundError = require("@errors/not-found-error");
 const ValidationError = require("@errors/validation-error");
 
@@ -11,14 +11,14 @@ const ValidationError = require("@errors/validation-error");
 module.exports = (router) => {
     /**
      * @swagger
-     * /api/v1/trades/{id}:
+     * /api/v1/exchanges/{id}:
      *   get:
-     *     summary: Get a trade by ID
+     *     summary: Get a exchange by ID
      *     description: >
-     *       Returns a single trade. Returns 404 if the trade does not exist or if
+     *       Returns a single exchange. Returns 404 if the exchange does not exist or if
      *       the requesting user is not a participant, so that the existence of
-     *       trades is not revealed to non-participants.
-     *     tags: [Trades]
+     *       exchanges is not revealed to non-participants.
+     *     tags: [exchanges]
      *     security:
      *       - bearerAuth: []
      *     parameters:
@@ -29,7 +29,7 @@ module.exports = (router) => {
      *           type: integer
      *     responses:
      *       200:
-     *         description: Trade returned successfully
+     *         description: exchange returned successfully
      *         content:
      *           application/json:
      *             schema:
@@ -38,27 +38,27 @@ module.exports = (router) => {
      *                 success:
      *                   type: boolean
      *                 data:
-     *                   $ref: '#/components/schemas/Trade'
+     *                   $ref: '#/components/schemas/Exchange'
      *       401:
      *         description: Not authenticated
      *       404:
-     *         description: Trade not found or user is not a participant
+     *         description: exchange not found or user is not a participant
      */
-    router.get("/trades/:id", isAuthenticated, isVerified, async (req, res) => {
+    router.get("/exchanges/:id", isAuthenticated, isVerified, async (req, res) => {
         requireParam(req.params.id, "id");
 
-        const tradeId = Number(req.params.id);
-        if (!Number.isInteger(tradeId) || tradeId <= 0) {
-            throw new ValidationError("Trade ID must be a positive integer.", { reason: "invalid_trade_id" });
+        const exchangeId = Number(req.params.id);
+        if (!Number.isInteger(exchangeId) || exchangeId <= 0) {
+            throw new ValidationError("exchange ID must be a positive integer.", { reason: "invalid_exchange_id" });
         }
 
-        req.infoEvent("trades.get", "Fetching trade", { tradeId, userId: req.user.id });
+        req.infoEvent("exchanges.get", "Fetching exchange", { exchangeId, userId: req.user.id });
 
-        const trade = await getTradeById(tradeId, req.user.id);
-        if (!trade) {
-            throw new NotFoundError("Trade not found.");
+        const exchange = await getExchangeById(exchangeId, req.user.id);
+        if (!exchange) {
+            throw new NotFoundError("exchange not found.");
         }
 
-        res.status(200).json({ success: true, data: trade });
+        res.status(200).json({ success: true, data: exchange });
     });
 };

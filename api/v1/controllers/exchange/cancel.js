@@ -1,6 +1,6 @@
 const { isAuthenticated, isVerified } = require("@middleware/authentication");
-const { requireParam } = require("@modules/error-wrapper");
-const { cancelTrade } = require("@services/trade-service");
+const { requireParam, requireBodyParam } = require("@modules/error-wrapper");
+const { cancelExchange } = require("@services/exchange-service");
 const ValidationError = require("@errors/validation-error");
 
 /**
@@ -10,13 +10,13 @@ const ValidationError = require("@errors/validation-error");
 module.exports = (router) => {
     /**
      * @swagger
-     * /api/v1/trades/{id}/cancel:
+     * /api/v1/exchanges/{id}/cancel:
      *   post:
-     *     summary: Cancel a trade (requester only)
+     *     summary: Cancel an exchange (requester only)
      *     description: >
-     *       Cancels a pending trade as the requester. The recipient receives a
-     *       `trade_canceled` notification.
-     *     tags: [Trades]
+     *       Cancels a pending exchanges as the requester. The recipient receives a
+     *       `exchanges_canceled` notification.
+     *     tags: [Exchangess]
      *     security:
      *       - bearerAuth: []
      *     parameters:
@@ -27,7 +27,7 @@ module.exports = (router) => {
      *           type: integer
      *     responses:
      *       200:
-     *         description: Trade canceled successfully
+     *         description: Exchange canceled successfully
      *         content:
      *           application/json:
      *             schema:
@@ -42,19 +42,21 @@ module.exports = (router) => {
      *       403:
      *         description: User is not the requester
      *       404:
-     *         description: Trade not found
+     *         description: Exchange not found
      */
-    router.post("/trades/:id/cancel", isAuthenticated, isVerified, async (req, res) => {
+    router.post("/trades/:id/cancel", isAuthenticated, async (req, res) => {
         requireParam(req.params.id, "id");
+        requireBodyParam(req.body.pin, "pin");
 
-        const tradeId = Number(req.params.id);
-        if (!Number.isInteger(tradeId) || tradeId <= 0) {
-            throw new ValidationError("Trade ID must be a positive integer.", { reason: "invalid_trade_id" });
+        const exchangeId = Number(req.params.id);
+        const { pin } = req.body;
+        if (!Number.isInteger(exchangeId) || exchangeId <= 0) {
+            throw new ValidationError("Exchange ID must be a positive integer.", { reason: "invalid_exchange_id" });
         }
 
-        req.infoEvent("trades.cancel", "Canceling trade", { tradeId, userId: req.user.id });
+        req.infoEvent("trades.cancel", "Canceling trade", { exchangeId, userId: req.user.id });
 
-        await cancelTrade(tradeId, req.user.id);
+        await cancelExchange(exchangeId, req.user.id);
         res.status(200).json({ success: true, data: {} });
     });
 };

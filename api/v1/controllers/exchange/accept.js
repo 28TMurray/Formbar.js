@@ -10,7 +10,7 @@ const ValidationError = require("@errors/validation-error");
 module.exports = (router) => {
         /**
     * @swagger
-    * /exchanges:
+    * /api/v1/exchanges:
     *   post:
     *     summary: Create a new exchange
     *     description: Creates a new exchange transaction between two parties
@@ -44,8 +44,11 @@ module.exports = (router) => {
     *                 data:
     *                   type: object
     *                   properties:
-    *                     exchangeId:
+    *                     accepted:
+    *                       type: boolean
+    *                     reason:
     *                       type: string
+    *                       nullable: true
     *       400:
     *         description: Request is badly formed or is missing PIN.
     *       401:
