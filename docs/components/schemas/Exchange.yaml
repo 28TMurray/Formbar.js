@@ -51,6 +51,7 @@ components:
               enum:
                 - user
                 - pool
+                - award
             offer:
               type: object
               description: Item quantities keyed by item ID (0 for digipogs).

@@ -6,8 +6,8 @@ const { parsePaginationQuery } = require("@modules/pagination");
 const NotFoundError = require("@errors/not-found-error");
 const ForbiddenError = require("@errors/forbidden-error");
 
-const DEFAULT_exchange_LIMIT = 20;
-const MAX_exchange_LIMIT = 100;
+const DEFAULT_EXCHANGE_LIMIT = 20;
+const MAX_EXCHANGE_LIMIT = 100;
 
 /**
  * Register exchanges list controller routes.
@@ -48,36 +48,33 @@ module.exports = (router) => {
      *                 success:
      *                   type: boolean
      *                 data:
-     *                   type: object
-     *                   properties:
+     *                   type: array
+     *                   items:
      *                     inbound:
-     *                       $ref: '#/components/schemas/TradeBucket'
-     *                     outbound:
-     *                       $ref: '#/components/schemas/TradeBucket'
-     *                     completed:
-     *                       $ref: '#/components/schemas/TradeBucket'
-     *                     inactive:
-     *                       $ref: '#/components/schemas/TradeBucket'
+     *                       $ref: '#/components/schemas/Exchange'
      *       401:
      *         description: Not authenticated
+     *       403:
+     *         description: Not able to view other users exchanges
      */
-    router.get("/user/:id/trades", isAuthenticated, isVerified, async (req, res) => {
+    router.get("/user/:id/exchanges", isAuthenticated, isVerified, async (req, res) => {
         const userId = Number(req.params.id);
         requireQueryParam(userId, "id");
 
         if (req.user.id !== userId) {
-            throw new ForbiddenError("You can only view your own trades.", { event: "user.trades.list.failed", reason: "forbidden" });
+            throw new ForbiddenError("You can only view your own exchanges.", { event: "user.exchanges.list.failed", reason: "forbidden" });
         }
 
-        const { limit, offset } = parsePaginationQuery(req.query, DEFAULT_TRADE_LIMIT, MAX_TRADE_LIMIT);
+        const { limit, offset } = parsePaginationQuery(req.query, DEFAULT_EXCHANGE_LIMIT, MAX_EXCHANGE_LIMIT);
+        const filters = req.query.filter?.match(/\S+/g);
         const requestedUser = await getUserDataFromDb(userId);
         if (!requestedUser) {
-            throw new NotFoundError("User not found.", { event: "user.trades.list.failed", reason: "user_not_found" });
+            throw new NotFoundError("User not found.", { event: "user.exchanges.list.failed", reason: "user_not_found" });
         }
 
-        req.infoEvent("user.trades.list.attempt", "Attempting to list user trades", { userId: userId });
+        req.infoEvent("user.exchanges.list.attempt", "Attempting to list user exchanges", { userId: userId });
 
-        const buckets = await getTradesForUser(userId, { limit, offset });
+        const buckets = await getExchangesForUser(userId, { limit, offset, filters});
         req.infoEvent("user.trades.list.success", "User trades listed successfully", { userId: userId });
         res.status(200).json({ success: true, data: buckets });
     });

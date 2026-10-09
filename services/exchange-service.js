@@ -510,7 +510,8 @@ async function getExchangeById(exchangeId, userId) {
  */
 async function getExchangesForUser(userId, { limit = 20, offset = 0, filters = ["inbound", "outbound"] }) {
     // Always include inbound and outbound by default if neither are specified
-    if (!filters.includes("inbound") && !filters.includes("outbound")) {
+    if (filters == null || (!filters.includes("inbound") && !filters.includes("outbound"))) {
+        filters ??= [];
         filters.push("inbound", "outbound");
     }
 
@@ -539,12 +540,12 @@ async function getExchangesForUser(userId, { limit = 20, offset = 0, filters = [
         const sqlFilter = sqlFilters[filter];
         const jsFilter = jsFilters[filter];
 
-        // Treat filter as filtering for a specific status if no sqlFilter defined
+        // Treat filter as filtering for a specific status if no sqlFilter of jsFilter defined
         // Use as statusFilters as binding parameters to avoid injection
-        if (sqlFilter == null) {
+        if (jsFilter == null && sqlFilter == null) {
             activeSqlFilters.push(`status = ?`);
             statusFilters.push(filter);
-        } else {
+        } else if (sqlFilter != null) {
             activeSqlFilters.push(sqlFilter);
         }
 
