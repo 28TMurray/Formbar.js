@@ -23,6 +23,12 @@ function getPayloadItems(payload) {
     return items;
 }
 
+/**
+ * Get the total quantity of an item held by a user.
+ * @param {number} userId
+ * @param {number|string} itemId
+ * @returns {Promise<number>}
+ */
 async function getInventoryTotal(userId, itemId) {
     const row = await dbGet("SELECT COALESCE(SUM(quantity), 0) AS total FROM inventory WHERE user_id = ? AND item_id = ?", [userId, itemId]);
     return row ? row.total : 0;
@@ -105,6 +111,12 @@ async function strictRemoveFromInventory(userId, itemId, quantity) {
     }
 }
 
+
+/**
+ * Get the user ID of the top holder associated with a pool.
+ * @param {number} poolId
+ * @returns {Promise<number>}
+ */
 async function getTopPoolHolderId(poolId) {
     const row = await dbGet("SELECT share_item FROM digipog_pools WHERE id = ?", [poolId]);
     if (row.share_item == null) {
@@ -114,6 +126,14 @@ async function getTopPoolHolderId(poolId) {
     }
 }
 
+/**
+ * Validate an exchange party and its offered or requested resources.
+ * @param {{id: number, type: "user"|"pool", pin?: string}} exchangeParty
+ * @param {Record<string, number>} payload Item IDs mapped to quantities.
+ * @param {string} name
+ * @param {string} payloadName
+ * @returns {Promise<Object>} The validated user or pool account.
+ */
 async function validateExchangePartyFields(exchangeParty, payload, name, payloadName) {
     // Check if well-formed
     if (typeof exchangeParty !== "object") {
@@ -164,6 +184,14 @@ async function validateExchangePartyFields(exchangeParty, payload, name, payload
     return exchangeAccount;
 }
 
+/**
+ * Validate the requesting party, including its resources and PIN.
+ * @param {{id: number, type: "user"|"pool", pin?: string}} fromParty
+ * @param {Record<string, number>} fromPayload
+ * @param {string} name
+ * @param {string} payloadName
+ * @returns {Promise<Object>} The validated user or pool account.
+ */
 async function validateRequesterPartyFields(fromParty, fromPayload, name, payloadName) {
     const fromAccount = await validateExchangePartyFields(fromParty, fromPayload, name, payloadName);
 
@@ -194,6 +222,11 @@ async function validateRequesterPartyFields(fromParty, fromPayload, name, payloa
     return fromAccount;
 }
 
+/**
+ * Create a trade or immediately complete a one-way transaction.
+ * @param {{to: {id: number, type: "user"|"pool", request: Record<string, number>}, from: {id: number, type: "user"|"pool", pin: string, offer: Record<string, number>}, reason?: string}} exchange
+ * @returns {Promise<{status: number, exchangeId: number}>}
+ */
 async function createExchange(exchange) {
     const { to, from, reason } = exchange;
     await validateExchangePartyFields(to, to.request, "to", "request");
@@ -309,6 +342,12 @@ async function createExchange(exchange) {
     return { status, exchangeId };
 }
 
+/**
+ * Accept a pending exchange and transfer its resources.
+ * @param {number} exchangeId
+ * @param {string} pin
+ * @returns {Promise<{success: boolean}>}
+ */
 async function acceptExchange(exchangeId, pin) {
     const exchange = await dbGet("SELECT * FROM exchanges WHERE id = ?", [exchangeId]);
 
@@ -334,6 +373,15 @@ async function acceptExchange(exchangeId, pin) {
     const now = new Date().toISOString()
 
     // Fail trade if insufficient items or digipogs
+    /**
+     * Ensure an exchange participant still holds the required resources.
+     * @param {"user"|"pool"} type
+     * @param {number} id
+     * @param {number} digipogs
+     * @param {Record<string, number>} items
+     * @param {string} name
+     * @returns {Promise<void>}
+     */
     async function checkResources(type, id, digipogs, items, name) {
         if (type === "user") {
             const user = await getUserDataFromDb(id);
@@ -403,6 +451,11 @@ async function acceptExchange(exchangeId, pin) {
     }
 }
 
+/**
+ * Convert an exchange database row into the API response shape.
+ * @param {Object} rawExchange Exchange row, including serialized offer/request fields.
+ * @returns {Object} Formatted exchange.
+ */
 function formatExchangeFromDbToApi(rawExchange) {
     const formattedExchange = {
         id: rawExchange.id,
@@ -427,6 +480,12 @@ function formatExchangeFromDbToApi(rawExchange) {
     return formattedExchange;
 }
 
+/**
+ * Get an exchange if the user is a participant or a top pool holder.
+ * @param {number} exchangeId
+ * @param {number} userId
+ * @returns {Promise<Object|null>}
+ */
 async function getExchangeById(exchangeId, userId) {
     const exchange = await dbGet("SELECT * FROM exchanges WHERE id = ?", [exchangeId]);
     const topHoldingPools = await getTopHoldingPoolsForUser(userId);
@@ -443,6 +502,12 @@ async function getExchangeById(exchangeId, userId) {
     return formatExchangeFromDbToApi(exchange);
 }
 
+/**
+ * List exchanges visible to a user, with pagination and optional filters.
+ * @param {number} userId
+ * @param {{limit?: number, offset?: number, filters?: string[]}} options
+ * @returns {Promise<{success: boolean, data: {exchanges: Object[], total: number, limit: number, offset: number, hasMore: boolean}}>} 
+ */
 async function getExchangesForUser(userId, { limit = 20, offset = 0, filters = ["inbound", "outbound"] }) {
     // Always include inbound and outbound by default if neither are specified
     if (!filters.includes("inbound") && !filters.includes("outbound")) {
@@ -515,6 +580,12 @@ async function getExchangesForUser(userId, { limit = 20, offset = 0, filters = [
     }
 }
 
+/**
+ * Cancel a pending exchange as its creator.
+ * @param {number} exchangeId
+ * @param {string} pin
+ * @returns {Promise<void>}
+ */
 async function cancelExchange(exchangeId, pin) {
     const exchange = await dbGet("SELECT from_user_id, from_id, from_type, status FROM exchanges WHERE id = ?", [exchangeId]);
 
@@ -544,6 +615,12 @@ async function cancelExchange(exchangeId, pin) {
     await createNotification(from_user_id, "exchange_canceled", { exchangeId: exchange.id });
 }
 
+/**
+ * Reject a pending exchange as its recipient.
+ * @param {number} exchangeId
+ * @param {string} pin
+ * @returns {Promise<void>}
+ */
 async function rejectExchange(exchangeId, pin) {
     const exchange = await dbGet("SELECT to_user_id, to_id, to_type, status FROM exchanges WHERE id = ?", [exchangeId]);
 
@@ -574,5 +651,9 @@ async function rejectExchange(exchangeId, pin) {
 
 module.exports = {
     createExchange,
-    acceptExchange
+    acceptExchange,
+    getExchangeById,
+    getExchangesForUser,
+    cancelExchange,
+    rejectExchange
 }
