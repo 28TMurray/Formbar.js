@@ -186,7 +186,7 @@ async function createPool({ name, description = "", defaultShareholderId }) {
  * @returns {Promise<void>}
  */
 async function deletePool(poolId) {
-    let foo = await dbGet("SELECT share_item FROM digipog_pools WHERE id = ?", [poolId])
+    let row = await dbGet("SELECT share_item FROM digipog_pools WHERE id = ?", [poolId])
     await dbRun("DELETE FROM inventory WHERE item_id = ?", [foo.share_item])
     await dbRun("DELETE FROM digipog_pools WHERE id = ?", [poolId]);
 }
@@ -197,12 +197,12 @@ async function deletePool(poolId) {
  * @returns {Promise<number[]>}
  */
 async function getPoolsForUser(userId) {
-    let allItems = await dbGetAll('SELECT item_id FROM inventory WHERE user_id = ?', [userId])
+    let allItems = await dbGetAll("SELECT item_id FROM inventory WHERE user_id = ?", [userId])
 
     let pools = []
 
     for (let item of allItems) {
-        let pool = await dbGet('SELECT id AS pool_id FROM digipog_pools WHERE share_item = ?', [item.item_id])
+        let pool = await dbGet("SELECT id AS pool_id FROM digipog_pools WHERE share_item = ?", [item.item_id])
         if (pool) pools.push(pool)
     }
 
@@ -242,11 +242,10 @@ async function getPoolsForUserPaginated(userId, limit = 20, offset = 0) {
  * @returns {Promise<Object[]>}
  */
 async function getUsersForPool(poolId) {
-    const shareItem = await dbGet('SELECT share_item FROM digipog_pools WHERE id = ?', [poolId])
-    const users = await dbGetAll('SELECT user_id FROM inventory WHERE item_id = ?', [shareItem])
-    let set = new Set(users) // TUCKER WHAT IS THIS
-    let arr = new Array(...set)
-    return arr.map(u => { return { user_id: u } }) // AAAAHHHHHH
+    const { share_item } = await dbGet("SELECT share_item FROM digipog_pools WHERE id = ?", [poolId]);
+    const users = await dbGetAll("SELECT user_id FROM inventory WHERE item_id = ?", [share_item]);
+    let set = new Set(users);
+    return [...set];
 }
 
 /**
@@ -256,11 +255,10 @@ async function getUsersForPool(poolId) {
  * @returns {Promise<boolean>}
  */
 async function isUserInPool(userId, poolId) {
-    const shareItem = await dbGet('SELECT share_item FROM digipog_pools WHERE id = ?', [poolId])
-    const users = await dbGetAll('SELECT user_id FROM inventory WHERE item_id = ?', [shareItem])
-    return users.includes(userId)
+    const { share_item } = await dbGet("SELECT share_item FROM digipog_pools WHERE id = ?", [poolId]);
+    const users = await dbGetAll("SELECT user_id FROM inventory WHERE item_id = ?", [share_item]);
+    return users.includes(userId);
 }
-
 
 /**
  * Checks whether a specific user is a top shareholder of the pool

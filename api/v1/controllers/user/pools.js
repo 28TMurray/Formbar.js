@@ -188,6 +188,7 @@ module.exports = (router) => {
                         poolApiObject = {
                             id: pool.id,
                             name: pool.name,
+                            description: pool.description,
                             shareItem: pool.share_item,
                             amount: pool.amount,
                             topShareholders,
