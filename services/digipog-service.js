@@ -187,7 +187,7 @@ async function createPool({ name, description = "", defaultShareholderId }) {
  */
 async function deletePool(poolId) {
     let row = await dbGet("SELECT share_item FROM digipog_pools WHERE id = ?", [poolId])
-    await dbRun("DELETE FROM inventory WHERE item_id = ?", [foo.share_item])
+    await dbRun("DELETE FROM inventory WHERE item_id = ?", [row.share_item])
     await dbRun("DELETE FROM digipog_pools WHERE id = ?", [poolId]);
 }
 
@@ -197,16 +197,19 @@ async function deletePool(poolId) {
  * @returns {Promise<number[]>}
  */
 async function getPoolsForUser(userId) {
-    let allItems = await dbGetAll("SELECT item_id FROM inventory WHERE user_id = ?", [userId])
+    const allItems = await dbGetAll("SELECT item_id FROM inventory WHERE user_id = ?", [userId]);
 
-    let pools = []
+    // For some reason, stacks are represented by multiple rows in the database
+    // Turn into to Set to filter for uniqueness 
+    const itemIds = new Set(allItems.map((item) => item.item_id));
 
-    for (let item of allItems) {
-        let pool = await dbGet("SELECT id AS pool_id FROM digipog_pools WHERE share_item = ?", [item.item_id])
-        if (pool) pools.push(pool)
+    let pools = [];
+    for (let item of itemIds) {
+        const pool = await dbGet("SELECT id AS pool_id FROM digipog_pools WHERE share_item = ?", [item]);
+        if (pool) pools.push(pool);
     }
 
-    return pools
+    return [...pools]
 }
 
 /**
@@ -242,8 +245,9 @@ async function getPoolsForUserPaginated(userId, limit = 20, offset = 0) {
  * @returns {Promise<Object[]>}
  */
 async function getUsersForPool(poolId) {
-    const { share_item } = await dbGet("SELECT share_item FROM digipog_pools WHERE id = ?", [poolId]);
-    const users = await dbGetAll("SELECT user_id FROM inventory WHERE item_id = ?", [share_item]);
+    const row = await dbGet("SELECT share_item FROM digipog_pools WHERE id = ?", [poolId]);
+    if (row == null) return [];
+    const users = await dbGetAll("SELECT user_id FROM inventory WHERE item_id = ?", [row.share_item]);
     let set = new Set(users);
     return [...set];
 }
@@ -255,9 +259,14 @@ async function getUsersForPool(poolId) {
  * @returns {Promise<boolean>}
  */
 async function isUserInPool(userId, poolId) {
-    const { share_item } = await dbGet("SELECT share_item FROM digipog_pools WHERE id = ?", [poolId]);
-    const users = await dbGetAll("SELECT user_id FROM inventory WHERE item_id = ?", [share_item]);
-    return users.includes(userId);
+    const row = await dbGet("SELECT share_item FROM digipog_pools WHERE id = ?", [poolId]);
+    if (row == null) return false;
+
+    const users = await dbGetAll("SELECT user_id FROM inventory WHERE item_id = ?", [row.share_item]);
+    for (const user of users) {
+        if (user.user_id === userId) return true;
+    }
+    return false;
 }
 
 /**
@@ -270,7 +279,7 @@ async function isPoolUserTopHolder(poolId, userId) {
     const row = await dbGet("SELECT share_item FROM digipog_pools WHERE id=?", [poolId]);
 
     const shareholders = await dbGetAll("SELECT user_id, quantity FROM inventory WHERE item_id=? ORDER BY quantity DESC", [row.share_item]);
-    const maxQuantity = shareholders[0].quantity;
+    const maxQuantity = shareholders[0]?.quantity ?? 0;
 
     for (const shareholder of shareholders) {
         if (shareholder.quantity < maxQuantity) break;
@@ -299,7 +308,6 @@ async function getTopHoldingPoolsForUser(userId) {
     const pools = await getPoolsForUser(userId);
 
     let topHoldingPools = [];
-
     for (const { pool_id } of pools) {
         if (await isPoolUserTopHolder(pool_id, userId))
             topHoldingPools.push(pool_id);
