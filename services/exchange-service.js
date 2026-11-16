@@ -662,5 +662,8 @@ module.exports = {
     getExchangeById,
     getExchangesForUser,
     cancelExchange,
-    rejectExchange
+    rejectExchange,
+    // For services that take exchange objects
+    validateExchangePartyFields,
+    validateRequesterPartyFields
 }
