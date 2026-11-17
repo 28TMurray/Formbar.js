@@ -64,8 +64,10 @@ async function checkInventoryAvailability(userId, items) {
  * @param {number} fromId
  * @param {string} toType
  * @param {number} toId
+ * @param {boolean} [tax=true] Whether to apply the transfer tax.
+ * @returns {Promise<void>}
  */
-async function exchangeDigipogs(amount, fromType, fromId, toType, toId) {
+async function exchangeDigipogs(amount, fromType, fromId, toType, toId, tax = true) {
     if (fromType === "user") {
         await dbRun("UPDATE users SET digipogs = digipogs - ? WHERE id = ? AND digipogs >= ?", [
             amount,
@@ -80,7 +82,7 @@ async function exchangeDigipogs(amount, fromType, fromId, toType, toId) {
         ]);
     }
 
-    creditDigipogTransferRecipient(amount, toType, toId);
+    await creditDigipogTransferRecipient(amount, toType, toId, tax);
 }
 
 /**
@@ -126,6 +128,45 @@ async function getTopPoolHolderId(poolId) {
 }
 
 /**
+ * Validate an exchange payload.
+ * @param {Record<string, number>} payload Item IDs mapped to quantities.
+ * @param {"user"|"pool"} type Type of the account submitting the payload.
+ * @param {string} payloadName Name used in validation error messages.
+ * @returns {Promise<void>}
+ */
+async function validatePayload(payload, type, payloadName) {
+    if (typeof payload !== "object") {
+        throw new ValidationError(`'${payloadName}' must be an object with IDs as keys and quantities as values.`);
+    } else {
+        for (const [itemId, quantity] of Object.entries(payload)) {
+            // Check if payload is well-formed
+            const itemIdNum = Number(itemId);
+
+            if (!Number.isInteger(itemIdNum) || itemIdNum < 0) {
+                throw new ValidationError(`'${payloadName}' must have valid IDs as keys (0 = digipogs, 1+ = item IDs).`);
+            }
+
+            if (!Number.isInteger(quantity) || quantity <= 0) {
+                throw new ValidationError(`'${payloadName}' must have positive integer values as quantities.`);
+            }
+
+            // Non-digipogs need additional checks
+            if (itemIdNum !== 0) {
+                if (type === "pool") {
+                    throw new ValidationError(`'${payloadName}' cannot contain items because it is of type 'pool'.`);
+                }
+
+                try {
+                    await getItemById(itemId);
+                } catch (err) {
+                    throw new NotFoundError(`Item ID ${itemId} is not associated with a valid item.`);
+                }
+            }
+        }
+    }
+}
+
+/**
  * Validate an exchange party and its offered or requested resources.
  * @param {{id: number, type: "user"|"pool", pin?: string}} exchangeParty
  * @param {Record<string, number>} payload Item IDs mapped to quantities.
@@ -150,35 +191,7 @@ async function validateExchangePartyFields(exchangeParty, payload, name, payload
         throw new NotFoundError(`'id' field '${name}' is not associated with a valid ${exchangeParty.type}.`);
     }
 
-    if (typeof payload !== "object") {
-        throw new ValidationError(`'${payloadName}' field of '${name}' must be an object with IDs as keys and quantities as values.`);
-    } else {
-        for (const [itemId, quantity] of Object.entries(payload)) {
-            // Check if payload is well-formed
-            const itemIdNum = Number(itemId);
-
-            if (!Number.isInteger(itemIdNum) || itemIdNum < 0) {
-                throw new ValidationError(`'${payloadName}' must have valid IDs as keys (0 = digipogs, 1+ = item IDs).`);
-            }
-
-            if (!Number.isInteger(quantity) || quantity <= 0) {
-                throw new ValidationError(`'${payloadName}' must have positive integer values as quantities.`);
-            }
-
-            // Non-digipogs need additional checks
-            if (itemIdNum !== 0) {
-                if (exchangeParty.type === "pool") {
-                    throw new ValidationError(`'${payloadName}' cannot contain items because it is of type 'pool'.`);
-                }
-
-                try {
-                    await getItemById(itemId);
-                } catch (err) {
-                    throw new NotFoundError(`Item ID ${itemId} is not associated with a valid item.`);
-                }
-            }
-        }
-    }
+    await validatePayload(payload, exchangeParty.type, payloadName);
 
     return exchangeAccount;
 }
@@ -219,6 +232,37 @@ async function validateRequesterPartyFields(fromParty, fromPayload, name, payloa
     if (fromParty.type === "pool") await verifyPoolPin(fromAccount.id, fromParty.pin);
 
     return fromAccount;
+}
+
+// Fail trade if insufficient items or digipogs
+/**
+ * Ensure an exchange participant still holds the required resources.
+ * @param {"user"|"pool"} type
+ * @param {number} id
+ * @param {number} digipogs
+ * @param {Record<string, number>} items
+ * @param {string} name
+ * @returns {Promise<void>}
+ */
+async function checkResources(type, id, digipogs, items, name) {
+    if (type === "user") {
+        const user = await getUserDataFromDb(id);
+        if (!user) {
+            throw new NotFoundError(`${name} is no longer associated with a valid user.`, { reason: "invalid_user" });
+        }
+        if (user.digipogs < digipogs) {
+            throw new ForbiddenError(`${name} has insufficient funds: need ${digipogs}, have ${user.digipogs}.`, { reason: "insufficient_funds" });
+        }
+        await checkInventoryAvailability(user.id, items);
+    } else {
+        const pool = await getPoolById(id);
+        if (!pool) {
+            throw new NotFoundError(`${name} is no longer associated with a valid pool.`, { reason: "invalid_pool", id: id });
+        }
+        if (pool.amount < digipogs) {
+            throw new ForbiddenError(`${name} has insufficient funds in pool: need ${digipogs}, have ${pool.amount}.`, { reason: "insufficient_pool_funds" });
+        }
+    }
 }
 
 /**
@@ -357,38 +401,7 @@ async function acceptExchange(exchangeId, pin) {
     const offerDigipogs = offer["0"] ?? 0;
     const requestDigipogs = request["0"] ?? 0;
 
-    const now = new Date().toISOString()
-
-    // Fail trade if insufficient items or digipogs
-    /**
-     * Ensure an exchange participant still holds the required resources.
-     * @param {"user"|"pool"} type
-     * @param {number} id
-     * @param {number} digipogs
-     * @param {Record<string, number>} items
-     * @param {string} name
-     * @returns {Promise<void>}
-     */
-    async function checkResources(type, id, digipogs, items, name) {
-        if (type === "user") {
-            const user = await getUserDataFromDb(id);
-            if (!user) {
-                throw new NotFoundError(`${name} is no longer associated with a valid user.`, { reason: "invalid_user" });
-            }
-            if (user.digipogs < digipogs) {
-                throw new ForbiddenError(`${name} has insufficient funds: need ${digipogs}, have ${user.digipogs}.`, { reason: "insufficient_funds" });
-            }
-            await checkInventoryAvailability(user.id, items);
-        } else {
-            const pool = await getPoolById(id);
-            if (!pool) {
-                throw new NotFoundError(`${name} is no longer associated with a valid pool.`, { reason: "invalid_pool", id: id });
-            }
-            if (pool.amount < digipogs) {
-                throw new ForbiddenError(`${name} has insufficient funds in pool: need ${digipogs}, have ${pool.amount}.`, { reason: "insufficient_pool_funds" });
-            }
-        }
-    }
+    const now = new Date().toISOString();
 
     try {
         await dbRun("BEGIN IMMEDIATE TRANSACTION");
@@ -436,6 +449,80 @@ async function acceptExchange(exchangeId, pin) {
         ]);
         throw err;
     }
+}
+
+/**
+ * Cancel a pending exchange as its creator.
+ * @param {number} exchangeId
+ * @param {string} pin
+ * @returns {Promise<void>}
+ */
+async function cancelExchange() {
+    const exchange = await dbGet("SELECT from_user_id, from_id, from_type, status FROM exchanges WHERE id = ?", [exchangeId]);
+
+    if (!exchange) {
+        throw new NotFoundError(`ID ${exchangeId} is not associated with a valid exchange.`)
+    }
+
+    const { from_user_id, from_id, from_type, status } = exchange;
+
+    if (status !== "pending") {
+        throw new ValidationError("This exchange is no longer pending.", { reason: "invalid_status", status: status });
+    }
+
+
+    if (from_type === "user") {
+        await verifyPin(from_user_id, pin);
+    } else {
+        await verifyPoolPin(from_id, pin);
+    }
+
+    await dbRun("BEGIN IMMEDIATE TRANSACTION");
+    {
+        await dbRun("UPDATE exchanges SET status = 'canceled', failure_reason = 'Creator initiated cancel' WHERE id = ?", [exchangeId]);
+    }
+    await dbRun("COMMIT");
+
+    await createNotification(from_user_id, "exchange_canceled", { exchangeId: exchange.id });
+}
+
+/**
+ * Reject a pending exchange as its recipient.
+ * @param {number} exchangeId
+ * @param {string} pin
+ * @returns {Promise<void>}
+ */
+async function rejectExchange(exchangeId, pin) {
+    const exchange = await dbGet("SELECT to_user_id, to_id, to_type, status FROM exchanges WHERE id = ?", [exchangeId]);
+
+    if (!exchange) {
+        throw new NotFoundError(`ID ${exchangeId} is not associated with a valid exchange.`)
+    }
+
+    const { to_user_id, to_id, to_type, status } = exchange;
+
+    if (status !== "pending") {
+        throw new ValidationError("This exchange is no longer pending.", { reason: "invalid_status", status: status });
+    }
+
+    if (to_type === "user") {
+        await verifyPin(to_user_id, pin);
+    } else {
+        await verifyPoolPin(to_id, pin);
+    }
+
+    await dbRun("BEGIN IMMEDIATE TRANSACTION");
+    {
+        await dbRun("UPDATE exchanges SET status = 'rejected', failure_reason = 'Recipient rejected the exchange' WHERE id = ?", [exchangeId]);
+    }
+    await dbRun("COMMIT");
+
+    await createNotification(to_user_id, "exchange_rejected", { exchangeId: exchange.id });
+}
+
+async function refundExchange(exchange) {
+    const { id, offer, request } = exchange;
+    if (offer) await validatePayload(offer,)
 }
 
 /**
@@ -587,83 +674,12 @@ async function getExchangesForUser(userId, options) {
     }
 }
 
-/**
- * Cancel a pending exchange as its creator.
- * @param {number} exchangeId
- * @param {string} pin
- * @returns {Promise<void>}
- */
-async function cancelExchange(exchangeId, pin) {
-    const exchange = await dbGet("SELECT from_user_id, from_id, from_type, status FROM exchanges WHERE id = ?", [exchangeId]);
-
-    if (!exchange) {
-        throw new NotFoundError(`ID ${exchangeId} is not associated with a valid exchange.`)
-    }
-
-    const { from_user_id, from_id, from_type, status } = exchange;
-
-    if (status !== "pending") {
-        throw new ValidationError("This exchange is no longer pending.", { reason: "invalid_status", status: status });
-    }
-
-
-    if (from_type === "user") {
-        await verifyPin(from_user_id, pin);
-    } else {
-        await verifyPoolPin(from_id, pin);
-    }
-
-    await dbRun("BEGIN IMMEDIATE TRANSACTION");
-    {
-        await dbRun("UPDATE exchanges SET status = 'canceled', failure_reason = 'Creator initiated cancel' WHERE id = ?", [exchangeId]);
-    }
-    await dbRun("COMMIT");
-
-    await createNotification(from_user_id, "exchange_canceled", { exchangeId: exchange.id });
-}
-
-/**
- * Reject a pending exchange as its recipient.
- * @param {number} exchangeId
- * @param {string} pin
- * @returns {Promise<void>}
- */
-async function rejectExchange(exchangeId, pin) {
-    const exchange = await dbGet("SELECT to_user_id, to_id, to_type, status FROM exchanges WHERE id = ?", [exchangeId]);
-
-    if (!exchange) {
-        throw new NotFoundError(`ID ${exchangeId} is not associated with a valid exchange.`)
-    }
-
-    const { to_user_id, to_id, to_type, status } = exchange;
-
-    if (status !== "pending") {
-        throw new ValidationError("This exchange is no longer pending.", { reason: "invalid_status", status: status });
-    }
-
-    if (to_type === "user") {
-        await verifyPin(to_user_id, pin);
-    } else {
-        await verifyPoolPin(to_id, pin);
-    }
-
-    await dbRun("BEGIN IMMEDIATE TRANSACTION");
-    {
-        await dbRun("UPDATE exchanges SET status = 'rejected', failure_reason = 'Recipient rejected the exchange' WHERE id = ?", [exchangeId]);
-    }
-    await dbRun("COMMIT");
-
-    await createNotification(to_user_id, "exchange_rejected", { exchangeId: exchange.id });
-}
-
 module.exports = {
     createExchange,
     acceptExchange,
-    getExchangeById,
-    getExchangesForUser,
     cancelExchange,
     rejectExchange,
-    // For services that take exchange objects
-    validateExchangePartyFields,
-    validateRequesterPartyFields
+    refundExchange,
+    getExchangeById,
+    getExchangesForUser,
 }

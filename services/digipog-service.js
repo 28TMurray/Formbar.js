@@ -1111,19 +1111,21 @@ function calculateDigipogTransferTax(amount) {
  * @param {number} amount - Gross transfer amount.
  * @param {"user"|"pool"} recipientType - Recipient account type.
  * @param {number} recipientId - Recipient account ID.
+ * @param {boolean} tax - Apply tax.
  * @returns {Promise<number>} Tax amount deducted.
  */
-async function creditDigipogTransferRecipient(amount, recipientType, recipientId) {
+async function creditDigipogTransferRecipient(amount, recipientType, recipientId, tax = true) {
     const { taxedAmount, taxAmount } = calculateDigipogTransferTax(amount);
+    const usedAmount = tax ? taxedAmount : amount;
 
     if (recipientType === "user") {
-        await dbRun("UPDATE users SET digipogs = digipogs + ? WHERE id = ?", [taxedAmount, recipientId]);
+        await dbRun("UPDATE users SET digipogs = digipogs + ? WHERE id = ?", [usedAmount, recipientId]);
     } else {
-        await dbRun("UPDATE digipog_pools SET amount = amount + ? WHERE id = ?", [taxedAmount, recipientId]);
+        await dbRun("UPDATE digipog_pools SET amount = amount + ? WHERE id = ?", [usedAmount, recipientId]);
     }
 
     const devPool = await dbGet("SELECT id FROM digipog_pools WHERE id = ?", [0]);
-    if (devPool) {
+    if (tax && devPool) {
         await dbRun("UPDATE digipog_pools SET amount = amount + ? WHERE id = ?", [taxAmount, 0]);
     }
 

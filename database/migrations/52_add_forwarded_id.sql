@@ -1,0 +1,1 @@
+ALTER TABLE exchanges ADD COLUMN forward_exchange_id
