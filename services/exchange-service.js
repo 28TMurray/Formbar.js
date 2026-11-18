@@ -457,7 +457,7 @@ async function acceptExchange(exchangeId, pin) {
  * @param {string} pin
  * @returns {Promise<void>}
  */
-async function cancelExchange() {
+async function cancelExchange(exchangeId, pin) {
     const exchange = await dbGet("SELECT from_user_id, from_id, from_type, status FROM exchanges WHERE id = ?", [exchangeId]);
 
     if (!exchange) {
@@ -520,9 +520,59 @@ async function rejectExchange(exchangeId, pin) {
     await createNotification(to_user_id, "exchange_rejected", { exchangeId: exchange.id });
 }
 
-async function refundExchange(exchange) {
-    const { id, offer, request } = exchange;
-    if (offer) await validatePayload(offer,)
+async function refundExchange(refund) {
+    const { id, partialOffer, partialRequest, pin } = refund;
+    const exchange = await getExchangeById(id);
+    if (!exchange) {
+        throw new NotFoundError("'id' is not associated with a valid exchange", { reason: "invalid_exchange", id: id });
+    }
+
+    if (partialOffer) await validatePayload(partialOffer, exchange.from.type, "partialOffer");
+    if (partialRequest) await validatePayload(partialRequest, exchange.to.type, "partialRequest");
+
+    if (exchange.from.type === "user") await verifyPin(exchange.from.id, pin);
+    if (exchange.from.type === "pool") await verifyPoolPin(exchange.from.id, pin);
+
+    const offerDigipogs = exchange.from.offer["0"] ?? 0;
+    const offerItems = getPayloadItems(exchange.from.offer);
+    const requestDigipogs = exchange.to.request["0"] ?? 0;
+    const requestItems = getPayloadItems(exchange.to.request);
+
+    const now = new Date().toISOString();
+
+    try {
+        // Normal resource check
+        await checkResources(exchange.from.type, exchange.from.id, offerDigipogs, offerItems, "Original creator");
+        await checkResources(exchange.to.type, exchange.to.id, requestDigipogs, requestItems, "Original recipient");
+        // Checks if resources is not over the original refund amount
+        const originalOfferDigipogs = originalExchange.from.offer["0"] ?? 0;
+        const originalOfferItems = getPayloadItems(originalExchange.from.offer);
+        const originalRequestDigipogs = originalExchange.to.request["0"] ?? 0;
+        const originalRequestItems = getPayloadItems(originalExchange.to.request);
+        // Helper function to check item quantities
+        function checkRefundItems(originalItems, refundItems, payloadName, refundName) {
+            for (const [itemId, quantity] of Object.entries(refundItems)) {
+                const originalQuantity = originalItems[itemId];
+                if (originalQuantity == null) {
+                    throw new ForbiddenError(
+                        `'${payloadName}' does not contain item with ID ${itemId}`,
+                        { reason: "nonexistent_payload", itemId }
+                    );
+                }
+                if (originalQuantity > (quantity ?? 0)) {
+                    throw new ForbiddenError(
+                        `'${refundName}' has ${quantity} of item with ID ${itemId} while ${originalItems} has ${originalQuantity} of item with ID ${itemId}`,
+                        { reason: "insufficient_payload", itemId }
+                    );
+                }
+            }
+        }
+
+        if (original)
+
+    } catch (err) {
+
+    }
 }
 
 /**
