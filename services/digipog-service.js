@@ -1353,6 +1353,7 @@ module.exports = {
     awardDigipogs,
     transferDigipogs,
     creditDigipogTransferRecipient,
+    calculateDigipogTransferTax,
 
     // Pool helpers
     createPool,
@@ -1369,4 +1370,5 @@ module.exports = {
     verifyPoolPin,
     removeUserFromPool,
     payoutPool,
+
 };

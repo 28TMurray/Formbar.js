@@ -1,5 +1,5 @@
 const { dbGet, dbRun, dbGetAll } = require("@modules/database");
-const { creditDigipogTransferRecipient, getPoolById, verifyPoolPin, getTopHoldingPoolsForUser } = require("@services/digipog-service");
+const { creditDigipogTransferRecipient, getPoolById, verifyPoolPin, getTopHoldingPoolsForUser, calculateDigipogTransferTax } = require("@services/digipog-service");
 const { getUserDataFromDb, verifyPin } = require("@services/user-service");
 const { addItemToInventory, getItemById } = require("@services/inventory-service");
 const { createNotification } = require("@services/notification-service");
@@ -64,25 +64,34 @@ async function checkInventoryAvailability(userId, items) {
  * @param {number} fromId
  * @param {string} toType
  * @param {number} toId
- * @param {boolean} [tax=true] Whether to apply the transfer tax.
+ * @param {boolean} [reverseTax=false] Change direction to apply the transfer tax.
  * @returns {Promise<void>}
  */
-async function exchangeDigipogs(amount, fromType, fromId, toType, toId, tax = true) {
+async function exchangeDigipogs(amount, fromType, fromId, toType, toId, reverseTax = false) {
+    const { taxedAmount, taxAmount } = calculateDigipogTransferTax(amount);
+    const usedAmount = reverseTax ? taxedAmount : amount;
+
     if (fromType === "user") {
         await dbRun("UPDATE users SET digipogs = digipogs - ? WHERE id = ? AND digipogs >= ?", [
-            amount,
+            usedAmount,
             fromId,
-            amount,
+            usedAmount,
         ]);
     } else {
         await dbRun("UPDATE digipog_pools SET amount = amount - ? WHERE id = ? AND amount >= ?", [
-            amount,
+            usedAmount,
             fromId,
-            amount,
+            usedAmount,
         ]);
     }
 
-    await creditDigipogTransferRecipient(amount, toType, toId, tax);
+    if (reverseTax) {
+        const { amount } = await dbGet("SELECT amount FROM digipog_pools WHERE id = 0");
+        const reducedAmount = Math.max(amount - taxAmount, 0);
+        await dbRun("UPDATE digipog_pools SET amount = ? WHERE id = 0", [reducedAmount]);
+    }
+
+    await creditDigipogTransferRecipient(amount, toType, toId, !reverseTax);
 }
 
 /**
@@ -524,17 +533,20 @@ async function rejectExchange(exchangeId, pin) {
  */
 async function refundExchange(refund) {
     const { id, partialOffer, partialRequest, pin } = refund;
-    const exchange = await getExchangeById(id);
+
+    const exchange = await getExchangeById(id, null, false);
+
     if (!exchange) {
         throw new NotFoundError("'id' is not associated with a valid exchange", { reason: "invalid_exchange", id });
     }
-    // Make sure exchange isn't refunded or doesn't refund another exchange
-    const { forwardId } = await dbGet("SELECT foward_exchange_id AS forwardId FROM exchanges WHERE forward_exchange_id = ?", [id]);
-    if (forwardId != null) {
-        throw new ForbiddenError("'id' refunds another exchange", { reason: "refunds_other_exchange", id, forwardId });
+    // Check if refundable
+    if (exchange.status !== "completed") {
+        throw new ForbiddenError(`exchange with ID ${id} is not refundable`, { reason: "refunded_exchange", id });
     }
-    if (exchange.status === "refunded") {
-        throw new ForbiddenError("'id' has already been refunded", { reason: "refunded_exchange", id });
+    // Shouldn't refund another exchange
+    const exchangeRecord = await dbGet("SELECT forward_exchange_id FROM exchanges WHERE forward_exchange_id = ?", [id]);
+    if (exchangeRecord?.forward_exchange_id != null) {
+        throw new ForbiddenError(`exchange with ID ${id} refunds another exchange`, { reason: "refunds_other_exchange", id, forwardId: exchangeRecord?.forward_exchange_id });
     }
 
     const { from, to } = exchange;
@@ -583,17 +595,19 @@ async function refundExchange(refund) {
 
     try {
         await dbRun("BEGIN IMMEDIATE TRANSACTION");
+        // Saved to the database
+        const savedOffer = {};
+        const savedRequest = {};
         
         // Transfer digipogs
         if (refundRequestDigipogs > 0) {
-            await exchangeDigipogs(refundRequestDigipogs, from.type, from.id, to.type, to.id, false);
+            savedRequest[0] = refundRequestDigipogs;
+            await exchangeDigipogs(refundRequestDigipogs, from.type, from.id, to.type, to.id, true);
         }
         if (refundOfferDigipogs > 0) {
-            await exchangeDigipogs(refundOfferDigipogs, to.type, to.id, from.type, from.id, false);
+            savedOffer[0] = refundOfferDigipogs;
+            await exchangeDigipogs(refundOfferDigipogs, to.type, to.id, from.type, from.id, true);
         }
-        // Saved to the database
-        const savedOffer = [];
-        const savedRequest = [];
         // Transfer items
         for (const [itemId, originalQuantity] of Object.entries(offerItems)) {
             const quantity = refundRequestItems[itemId] ?? originalQuantity;
@@ -687,17 +701,16 @@ function formatExchangeFromDbToApi(rawExchange) {
  * @param {number} userId
  * @returns {Promise<Object|null>}
  */
-async function getExchangeById(exchangeId, userId) {
+async function getExchangeById(exchangeId, userId, userCheck = true) {
     const exchange = await dbGet("SELECT * FROM exchanges WHERE id = ?", [exchangeId]);
     const topHoldingPools = await getTopHoldingPoolsForUser(userId);
-    if (!exchange ||
-        (
-            exchange.from_user_id !== userId &&
-            exchange.to_user_id !== userId &&
-            !topHoldingPools.includes(exchange.from_user_id) &&
-            !topHoldingPools.includes(exchange.to_user_id)
-        )
-    ) {
+    const isTopHolder = userCheck ? (
+            exchange.from_user_id === userId ||
+            exchange.to_user_id === userId ||
+            topHoldingPools.includes(exchange.from_user_id) ||
+            topHoldingPools.includes(exchange.to_user_id)
+        ) : true;
+    if (!exchange || !isTopHolder) {
         return null;
     }
     return formatExchangeFromDbToApi(exchange);
