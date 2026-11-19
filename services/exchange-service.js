@@ -320,13 +320,13 @@ async function createExchange(exchange) {
         );
         status = 201;
 
-        await createNotification(to.userId, "exchange_received", { exchangeId, fromUserId: from.userId });
+        await createNotification(to.userId, "exchange_completed", { exchangeId, fromUserId: from.userId });
     } else {
         try {
             await dbRun("BEGIN IMMEDIATE TRANSACTION");
             {
                 if (offerDigipogs > 0) {
-                    exchangeDigipogs(offerDigipogs, from.type, from.id, to.type, to.id);
+                    await exchangeDigipogs(offerDigipogs, from.type, from.id, to.type, to.id);
                 }
                 // Transfer items
                 for (const [itemId, quantity] of Object.entries(offerItems)) {
@@ -352,10 +352,7 @@ async function createExchange(exchange) {
                         now,
                     ]
                 );
-                await Promise.allSettled([
-                    createNotification(from.userId, "exchange_completed", { exchangeId }),
-                    createNotification(to.userId, "exchange_completed", { exchangeId }),
-                ]);
+                await createNotification(to.userId, "exchange_received", { exchangeId });
             }
             await dbRun("COMMIT");
 
@@ -415,7 +412,7 @@ async function acceptExchange(exchangeId, pin) {
             if (offerDigipogs > 0) await exchangeDigipogs(offerDigipogs, exchange.from_type, offerId, exchange.to_type, requestId);
             if (requestDigipogs > 0) await exchangeDigipogs(requestDigipogs, exchange.to_type, requestId, exchange.from_type, offerId);
 
-            // Transfer resources
+            // Transfer items
             for (const [itemId, quantity] of Object.entries(offerItems)) {
                 await strictRemoveFromInventory(offerId, itemId, quantity);
                 await addItemToInventory(requestId, itemId, quantity);
@@ -520,58 +517,136 @@ async function rejectExchange(exchangeId, pin) {
     await createNotification(to_user_id, "exchange_rejected", { exchangeId: exchange.id });
 }
 
+/**
+ * Refund an exchange.
+ * @param {object} refund
+ * @returns {Promise<void>}
+ */
 async function refundExchange(refund) {
     const { id, partialOffer, partialRequest, pin } = refund;
     const exchange = await getExchangeById(id);
     if (!exchange) {
-        throw new NotFoundError("'id' is not associated with a valid exchange", { reason: "invalid_exchange", id: id });
+        throw new NotFoundError("'id' is not associated with a valid exchange", { reason: "invalid_exchange", id });
+    }
+    // Make sure exchange isn't refunded or doesn't refund another exchange
+    const { forwardId } = await dbGet("SELECT foward_exchange_id AS forwardId FROM exchanges WHERE forward_exchange_id = ?", [id]);
+    if (forwardId != null) {
+        throw new ForbiddenError("'id' refunds another exchange", { reason: "refunds_other_exchange", id, forwardId });
+    }
+    if (exchange.status === "refunded") {
+        throw new ForbiddenError("'id' has already been refunded", { reason: "refunded_exchange", id });
     }
 
-    if (partialOffer) await validatePayload(partialOffer, exchange.from.type, "partialOffer");
-    if (partialRequest) await validatePayload(partialRequest, exchange.to.type, "partialRequest");
+    const { from, to } = exchange;
 
-    if (exchange.from.type === "user") await verifyPin(exchange.from.id, pin);
-    if (exchange.from.type === "pool") await verifyPoolPin(exchange.from.id, pin);
+    if (partialOffer) await validatePayload(partialOffer, from.type, "partialOffer");
+    if (partialRequest) await validatePayload(partialRequest, to.type, "partialRequest");
 
-    const offerDigipogs = exchange.from.offer["0"] ?? 0;
-    const offerItems = getPayloadItems(exchange.from.offer);
-    const requestDigipogs = exchange.to.request["0"] ?? 0;
-    const requestItems = getPayloadItems(exchange.to.request);
+    if (from.type === "user") await verifyPin(from.id, pin);
+    if (from.type === "pool") await verifyPoolPin(from.id, pin);
+
+    const offerDigipogs = from.offer["0"] ?? 0;
+    const offerItems = getPayloadItems(from.offer);
+    const requestDigipogs = to.request["0"] ?? 0;
+    const requestItems = getPayloadItems(to.request);
+    // Normal resource check
+    await checkResources(from.type, from.id, offerDigipogs, offerItems, "Original creator");
+    await checkResources(to.type, to.id, requestDigipogs, requestItems, "Original recipient");
+    // Helper function to check item quantities exist and dont exceed original
+    function checkRefundResources(original, refund, payloadName, refundName) {
+        for (const [itemId, quantity] of Object.entries(refund)) {
+            const originalQuantity = original[itemId];
+            if (originalQuantity == null) {
+                throw new ForbiddenError(
+                    `Original '${payloadName}' does not contain item with ID ${itemId}`,
+                    { reason: "nonexistent_payload", itemId }
+                );
+            }
+            if (originalQuantity > (quantity ?? 0)) {
+                throw new ForbiddenError(
+                    `'${refundName}' has ${quantity} of item with ID ${itemId} while original '${payloadName}' has ${originalQuantity} of item with ID ${itemId}`,
+                    { reason: "insufficient_payload", itemId }
+                );
+            }
+        }
+        return true
+    }
+    checkRefundResources(from.offer, partialOffer, "offer", "partialOffer");
+    checkRefundResources(to.request, partialRequest, "request", "partialRequest");
+    // if field is missing in partial refund then just use the original digipog quantity
+    const refundOfferDigipogs = partialOffer["0"] ?? offerDigipogs;
+    const refundOfferItems = getPayloadItems(partialOffer);
+    const refundRequestDigipogs = partialRequest["0"] ?? requestDigipogs;
+    const refundRequestItems = getPayloadItems(partialRequest);
 
     const now = new Date().toISOString();
 
     try {
-        // Normal resource check
-        await checkResources(exchange.from.type, exchange.from.id, offerDigipogs, offerItems, "Original creator");
-        await checkResources(exchange.to.type, exchange.to.id, requestDigipogs, requestItems, "Original recipient");
-        // Checks if resources is not over the original refund amount
-        const originalOfferDigipogs = originalExchange.from.offer["0"] ?? 0;
-        const originalOfferItems = getPayloadItems(originalExchange.from.offer);
-        const originalRequestDigipogs = originalExchange.to.request["0"] ?? 0;
-        const originalRequestItems = getPayloadItems(originalExchange.to.request);
-        // Helper function to check item quantities
-        function checkRefundItems(originalItems, refundItems, payloadName, refundName) {
-            for (const [itemId, quantity] of Object.entries(refundItems)) {
-                const originalQuantity = originalItems[itemId];
-                if (originalQuantity == null) {
-                    throw new ForbiddenError(
-                        `'${payloadName}' does not contain item with ID ${itemId}`,
-                        { reason: "nonexistent_payload", itemId }
-                    );
-                }
-                if (originalQuantity > (quantity ?? 0)) {
-                    throw new ForbiddenError(
-                        `'${refundName}' has ${quantity} of item with ID ${itemId} while ${originalItems} has ${originalQuantity} of item with ID ${itemId}`,
-                        { reason: "insufficient_payload", itemId }
-                    );
-                }
-            }
+        await dbRun("BEGIN IMMEDIATE TRANSACTION");
+        
+        // Transfer digipogs
+        if (refundRequestDigipogs > 0) {
+            await exchangeDigipogs(refundRequestDigipogs, from.type, from.id, to.type, to.id, false);
+        }
+        if (refundOfferDigipogs > 0) {
+            await exchangeDigipogs(refundOfferDigipogs, to.type, to.id, from.type, from.id, false);
+        }
+        // Saved to the database
+        const savedOffer = [];
+        const savedRequest = [];
+        // Transfer items
+        for (const [itemId, originalQuantity] of Object.entries(offerItems)) {
+            const quantity = refundRequestItems[itemId] ?? originalQuantity;
+            savedOffer[itemId] = quantity;
+            await strictRemoveFromInventory(from.id, itemId, quantity);
+            await addItemToInventory(to.id, itemId, quantity);
+        }
+        for (const [itemId, originalQuantity] of Object.entries(requestItems)) {
+            const quantity = refundOfferItems[itemId] ?? originalQuantity;
+            savedRequest[itemId] = quantity;
+            await strictRemoveFromInventory(to.id, itemId, quantity);
+            await addItemToInventory(from.id, itemId, quantity);
         }
 
-        if (original)
+        // For the database and notifications
+        to.poolId = to.type === "pool" ? to.id : null;
+        to.userId = to.type === "user" ? to.id : await getTopPoolHolderId(to.poolId);
+        from.userId = from.type === "user" ? from.id : from.userId;
+        from.poolId = from.type === "pool" ? from.id : null;
 
+        // Log exchange (swap the original 'from' and 'to')
+        let exchangeId = await dbRun(
+            `INSERT INTO exchanges (from_user_id, from_id, from_type, offer, to_user_id, to_id, to_type,
+                                request, reason, status, created_at, updated_at, forward_exchange_id) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Refund', 'completed', ?, ?, ?)`,
+            [
+                to.userId,
+                to.poolId,
+                to.type,
+                JSON.stringify(savedOffer),
+                from.userId,
+                from.poolId,
+                from.type,
+                JSON.stringify(savedRequest),
+                now,
+                now,
+                id,
+            ]
+        );
+
+        // Set refund
+        await dbRun("UPDATE exchanges SET status = 'refunded', updated_at = ? WHERE id = ?", [now, exchange.id]);
+        await dbRun("COMMIT");
+
+        await Promise.allSettled([
+            createNotification(to.userId, "exchange_refunded", { exchangeId }),
+            createNotification(from.userId, "exchange_refunded", { exchangeId }),
+        ]);
+
+        return { success: true };
     } catch (err) {
-
+        await dbRun("ROLLBACK");
+        throw err;
     }
 }
 
