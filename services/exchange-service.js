@@ -361,7 +361,7 @@ async function createExchange(exchange) {
                         now,
                     ]
                 );
-                await createNotification(to.userId, "exchange_received", { exchangeId });
+                await createNotification(to.userId, "exchange_received", { exchangeId, fromUserId: from.userId });
             }
             await dbRun("COMMIT");
 
